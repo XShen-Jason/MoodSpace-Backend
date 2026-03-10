@@ -15,6 +15,23 @@ const router = express.Router();
 
 const BASE_DOMAIN = '885201314.xyz';
 
+let memoryBlocklist = [];
+let blocklistLoaded = false;
+
+async function ensureBlocklist() {
+    if (!blocklistLoaded) {
+        try {
+            const list = await kvGet('__sys__blocklist');
+            if (Array.isArray(list)) memoryBlocklist = list.map(s => String(s).toLowerCase());
+            blocklistLoaded = true;
+            console.log('[Blocklist] Initial loaded from KV:', memoryBlocklist.length, 'items');
+        } catch (e) {
+            console.error('[Blocklist] Init failed', e);
+            blocklistLoaded = true;
+        }
+    }
+}
+
 // ── Helper: append projectId to template user index in KV ──────────────────
 async function addToUserIndex(templateName, subdomain) {
     const key = `__users__${templateName}`;
@@ -30,6 +47,12 @@ async function addToUserIndex(templateName, subdomain) {
 async function validateAndCheckQuota(userId, subdomain) {
     if (!userId) {
         return { isValid: false, code: 4001, message: '请求必须包含 userId 以验证身份' };
+    }
+
+    // 0. Zero-Quota Blocklist Check
+    await ensureBlocklist();
+    if (memoryBlocklist.includes(subdomain.toLowerCase())) {
+        return { isValid: false, code: 4003, message: '该域名为系统保留字或已禁用，请更换试试哦' };
     }
 
     // 1. Check if subdomain already exists
@@ -68,6 +91,23 @@ async function validateAndCheckQuota(userId, subdomain) {
         return { isValid: true, mode: 'CREATE' };
     }
 }
+
+// ── POST /api/project/config/refresh-blocklist ─────────────────────────────
+router.post('/config/refresh-blocklist', requireAdmin, async (req, res) => {
+    try {
+        const list = await kvGet('__sys__blocklist');
+        if (Array.isArray(list)) {
+            memoryBlocklist = list.map(s => String(s).toLowerCase());
+        } else {
+            memoryBlocklist = [];
+        }
+        blocklistLoaded = true;
+        return res.json({ success: true, count: memoryBlocklist.length, message: 'Blocklist refreshed in memory' });
+    } catch (err) {
+        console.error('[project/refresh-blocklist]', err);
+        return res.status(500).json({ error: err.message });
+    }
+});
 
 // ── POST /api/project/render ───────────────────────────────────────────────
 // Universal CQRS write endpoint (Handles Create & Update)
@@ -112,7 +152,7 @@ router.post('/render', async (req, res) => {
         const rendered = injectData(htmlBuf.toString('utf-8'), data, schema);
 
         // 6. Push final static HTML to R2
-        await r2Put(`pages/${subdomain}.html`, Buffer.from(rendered, 'utf-8'), 'text/html;charset=UTF-8');
+        await r2Put(`pages/${subdomain}/index.html`, Buffer.from(rendered, 'utf-8'), 'text/html;charset=UTF-8');
 
         // 7. Push lightweight router config to KV (Edge router uses status:1 to allow traffic)
         await kvPut(subdomain, { status: 1, template: type });

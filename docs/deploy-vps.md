@@ -167,4 +167,18 @@ sudo systemctl restart nginx
 ```
 
 🎉 **大功告成！全剧终！**
-现在，在您的电脑浏览器里输入 `https://api.885201314.xyz/health`，如果能看到内容，说明所有的网络、端口、后台代码都完美串联工作了！如果您后续在本地改了代码推送到 GitHub，只需要在 VPS 里输 `cd /opt/RomanceSpace-Backend` 然后 `git pull` 然后 `pm2 restart romancespace-api` 就更新好了。
+现在，在您的电脑浏览器里输入 `https://api.885201314.xyz/health`，如果能看到内容，说明所有的网络、端口、后台代码都完美串联工作了！
+
+---
+
+## 🔗 前后端联动配置 (重要)
+
+当您的后端 API 域名 `https://api.885201314.xyz` 部署成功后，您需要去 **RomanceSpace-Frontend** 项目中做一次最后的对齐：
+
+1.  如果您是在 **Cloudflare Pages** 托管前端：
+    -   去 Pages 控制台 -> `设置` -> `环境变量`。
+    -   添加一个变量：`VITE_API_BASE_URL`，值填入 `https://api.885201314.xyz`。
+    -   重新触发一次部署。
+2.  如果不配置这个变量，前端默认会去请求 `localhost:3000`，这会导致浏览器报错。
+
+如果您后续在本地改了代码推送到 GitHub，只需要在 VPS 里输 `cd /opt/RomanceSpace-Backend` 然后 `git pull` 然后 `pm2 restart romancespace-api` 就更新好了。

@@ -98,8 +98,8 @@ router.get('/list', async (_req, res) => {
     }
 });
 
-// ── GET /api/template/preview/:name ──────────────────────────────────────────
-router.get('/preview/:name', async (req, res) => {
+// ── GET /api/template/raw/:name ──────────────────────────────────────────────
+router.get('/raw/:name', async (req, res) => {
     try {
         const { name } = req.params;
         const meta = await kvGet(`__tmpl__${name}`);
@@ -108,21 +108,18 @@ router.get('/preview/:name', async (req, res) => {
         const htmlBuf = await r2Get(`templates/${name}/${meta.version}/index.html`);
         if (!htmlBuf) return res.status(404).json({ error: 'Template HTML missing in R2' });
 
-        const schemaBuf = await r2Get(`templates/${name}/${meta.version}/schema.json`);
-        const schema = schemaBuf ? JSON.parse(schemaBuf.toString('utf-8')) : null;
-
-        // Render with schema defaults
-        const defaults = {};
-        (schema?.fields ?? []).forEach((f) => {
-            if (f.default !== undefined) defaults[f.key] = f.default;
-        });
-
-        const rendered = injectData(htmlBuf.toString('utf-8'), defaults, schema);
-        return res.set('Content-Type', 'text/html;charset=UTF-8').send(rendered);
+        res.set('Cache-Control', 'public, max-age=3600');
+        res.set('Content-Type', 'text/plain;charset=UTF-8');
+        return res.send(htmlBuf.toString('utf-8'));
     } catch (err) {
-        console.error('[template/preview]', err);
+        console.error('[template/raw]', err);
         return res.status(500).json({ error: err.message });
     }
+});
+
+// ── GET /api/template/preview/:name ──────────────────────────────────────────
+router.get('/preview/:name', (req, res) => {
+    return res.redirect(`https://romancespace.885201314.xyz/preview/${req.params.name}`);
 });
 
 module.exports = router;
