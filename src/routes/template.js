@@ -15,6 +15,8 @@ const { injectData } = require('../utils/html');
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
+let cachedTemplates = null;
+
 // ── POST /api/template/upload ─────────────────────────────────────────────────
 router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
     try {
@@ -59,6 +61,9 @@ router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
             updatedAt: new Date().toISOString(),
         });
 
+        // Invalidate the in-memory template list cache
+        cachedTemplates = null;
+
         // TODO (P2): async re-render old user pages that use this template
         // For now we log it; BullMQ / worker job to be added later
         const userIndex = await kvGet(`__users__${templateName}`);
@@ -89,9 +94,15 @@ router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
 // ── GET /api/template/list ────────────────────────────────────────────────────
 router.get('/list', async (_req, res) => {
     try {
-        const keys = await kvList('__tmpl__');
-        const metas = await Promise.all(keys.map((k) => kvGet(k)));
-        return res.json({ success: true, templates: metas.filter(Boolean) });
+        if (!cachedTemplates) {
+            const keys = await kvList('__tmpl__');
+            const metas = await Promise.all(keys.map((k) => kvGet(k)));
+            cachedTemplates = metas.filter(Boolean);
+            console.log(`[template/list] Cache MISS: Loaded ${cachedTemplates.length} templates from KV.`);
+        }
+
+        res.set('Cache-Control', 'public, max-age=60'); // Browser caches for 1 minute
+        return res.json({ success: true, templates: cachedTemplates });
     } catch (err) {
         console.error('[template/list]', err);
         return res.status(500).json({ error: err.message });
