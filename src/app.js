@@ -24,7 +24,7 @@ const app = express();
 // Adjust windowMs / max as traffic grows.
 const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15-minute window
-    max: 60,                   // max 60 requests per IP per window
+    max: 200,                  // max 200 requests per IP per window (relaxed from 60 to avoid 4290 errors)
     standardHeaders: true,     // Return rate limit info in RateLimit-* headers
     legacyHeaders: false,
     message: {
