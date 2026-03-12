@@ -293,7 +293,8 @@ router.post('/render', async (req, res) => {
         // 10. Purge CDN cache if this is an update
         const pageUrl = `https://${subdomain}.${BASE_DOMAIN}/`;
         if (isUpdate) {
-            await purgeCacheUrls([pageUrl]);
+            // Purge both with and without trailing slash to be safe
+            await purgeCacheUrls([pageUrl, pageUrl.slice(0, -1)]);
         }
 
         // 11. Return standard successful response
