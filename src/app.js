@@ -58,6 +58,11 @@ app.use('/api/', apiLimiter);
 app.use('/api/template', templateRouter);
 app.use('/api/project', projectRouter);
 
+// ── Template Asset Serving (NOT rate-limited — public CDN-like route) ────────
+// Serves CSS/JS/images for templates from R2 via /assets/:type/:filepath
+// This route must be before the SPA fallback to avoid serving index.html for assets.
+app.use('/assets', templateRouter);
+
 // ── Frontend Static Site Serving ─────────────────────────────────────────────
 // Serve the compiled React bundle.  Run `npm run build` in RomanceSpace-Frontend first.
 // The dist/ folder is expected to live at: ../RomanceSpace-Frontend/dist/

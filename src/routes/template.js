@@ -101,6 +101,43 @@ router.get('/list', async (_req, res) => {
     }
 });
 
+// ── GET /assets/:type/*filepath — Serve template static assets from R2 ─────────
+// This is the critical path for CSS/JS/images in both the Gallery preview and
+// the Builder's real-time preview iframe.
+// Cache: in-memory version map to avoid KV reads on every asset request.
+const assetVersionCache = new Map();
+
+router.get('/assets/:type/*', async (req, res) => {
+    try {
+        const { type } = req.params;
+        // Express 4 wildcard: req.params[0] holds the rest of the path
+        const filePath = req.params[0];
+
+        // 1. Resolve template version (in-memory cache → KV)
+        let version = assetVersionCache.get(type);
+        if (!version) {
+            const meta = await kvGet(`__tmpl__${type}`);
+            if (!meta) return res.status(404).send('Template not found');
+            version = meta.version;
+            assetVersionCache.set(type, version);
+        }
+
+        // 2. Fetch from R2
+        const r2Key = `templates/${type}/${version}/${filePath}`;
+        const buf = await r2Get(r2Key);
+        if (!buf) return res.status(404).send('Asset not found');
+
+        // 3. Return with correct MIME type and long cache (versioned path = immutable)
+        const { getMime } = require('../utils/mime');
+        res.set('Content-Type', getMime(filePath));
+        res.set('Cache-Control', 'public, max-age=31536000, immutable');
+        return res.send(buf);
+    } catch (err) {
+        console.error('[template/assets]', err);
+        return res.status(500).send('Internal Server Error');
+    }
+});
+
 // ── GET /api/template/raw/:name ──────────────────────────────────────────────
 router.get('/raw/:name', async (req, res) => {
     try {
@@ -143,7 +180,15 @@ router.get('/preview/:name', async (req, res) => {
         // 1. Inject <base> tag so relative assets (CSS/JS) load from the versions path in CDN
         // Note: Deployment guide suggests assets are served from /assets/:name/ which maps to R2
         const baseTag = `<base href="https://www.885201314.xyz/assets/${name}/" />`;
-        html = html.replace('<head>', `<head>\n  ${baseTag}`);
+        
+        // Robust injection: find <head> case-insensitive, or prepend if missing
+        const headRegex = /<head[^>]*>/i;
+        if (headRegex.test(html)) {
+            html = html.replace(headRegex, (match) => `${match}\n  ${baseTag}`);
+        } else {
+            // Fallback: prepend to the very beginning if no <head> found
+            html = `${baseTag}\n${html}`;
+        }
 
         // 2. Inject default data from schema
         const rendered = injectData(html, {}, schema);
