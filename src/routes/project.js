@@ -18,12 +18,14 @@ const BASE_DOMAIN = '885201314.xyz';
 let memoryBlocklist = [];
 let blocklistLoaded = false;
 
-let memoryQuotas = {
+const QUOTA_DEFAULTS = {
     'free': { limit: 1, dailyLimit: 5, label: '🌟 体验用户' },
     'pro': { limit: 5, dailyLimit: 20, label: '💎 高级会员' },
     'partner': { limit: 10, dailyLimit: 50, label: '👑 终身合伙人' },
     'admin': { limit: 999, dailyLimit: 999, label: '🛡️ 系统管理员' }
 };
+
+let memoryQuotas = { ...QUOTA_DEFAULTS };
 let quotasLoaded = false;
 
 async function ensureQuotas() {
@@ -173,20 +175,13 @@ router.post('/config/refresh-quotas', requireAdmin, async (req, res) => {
     try {
         const list = await kvGet('__sys__quotas');
         if (list && typeof list === 'object') {
-            const defaults = {
-                'free': { limit: 1, label: '🌟 体验用户' },
-                'pro': { limit: 5, label: '💎 高级会员' },
-                'partner': { limit: 10, label: '👑 终身合伙人' },
-                'admin': { limit: 999, label: '🛡️ 系统管理员' }
-            };
-            
             // Re-merge with defaults to allow partial overrides
-            let newQuotas = { ...defaults };
+            let newQuotas = { ...QUOTA_DEFAULTS };
             for (const key in list) {
                 if (typeof list[key] === 'number') {
-                    newQuotas[key] = { ...defaults[key], limit: list[key] };
+                    newQuotas[key] = { ...QUOTA_DEFAULTS[key], limit: list[key] };
                 } else if (typeof list[key] === 'object') {
-                    newQuotas[key] = { ...defaults[key], ...list[key] };
+                    newQuotas[key] = { ...QUOTA_DEFAULTS[key], ...list[key] };
                 }
             }
             memoryQuotas = newQuotas;
@@ -340,12 +335,17 @@ router.get('/status/:userId', async (req, res) => {
         // 1. Fetch user tier and edit stats
         const { data: profile, error: profileErr } = await supabase
             .from('profiles')
-            .select('tier, daily_edit_count, last_edit_date')
+            .select('tier, role, daily_edit_count, last_edit_date')
             .eq('id', userId)
             .maybeSingle();
         
         if (profileErr) throw new Error('Supabase Profile Error: ' + profileErr.message);
-        const tier = profile?.tier || 'free';
+        
+        // Priority: tier field -> role field (as fallback) -> free
+        let tier = profile?.tier || (profile?.role === 'admin' ? 'admin' : 'free');
+        if (tier && !memoryQuotas[tier]) tier = 'free'; // Fallback if invalid tier string
+        
+        console.log(`[Debug Quota] User: ${userId}, Raw Tier: "${profile?.tier}", Role: "${profile?.role}", Final Tier: "${tier}"`);
 
         // 2. Count existing projects
         const { count, error: countErr } = await supabase
