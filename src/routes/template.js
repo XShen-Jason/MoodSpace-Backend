@@ -82,7 +82,7 @@ router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
             fields,
             static: isStatic,
             filesUploaded: uploadedFiles,
-            previewUrl: `https://romancespace.885201314.xyz/preview/${templateName}`,
+            previewUrl: `https://www.885201314.xyz/preview/${templateName}`,
             pendingReRenderUsers: usersCount,
         });
     } catch (err) {
@@ -130,7 +130,7 @@ router.get('/raw/:name', async (req, res) => {
 
 // ── GET /api/template/preview/:name ──────────────────────────────────────────
 router.get('/preview/:name', (req, res) => {
-    return res.redirect(`https://romancespace.885201314.xyz/preview/${req.params.name}`);
+    return res.redirect(`https://www.885201314.xyz/preview/${req.params.name}`);
 });
 
 module.exports = router;
