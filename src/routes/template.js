@@ -148,6 +148,7 @@ router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
 
         // Invalidate the in-memory cache and rebuild the static templates.json file on disk
         cachedTemplates = null;
+        assetVersionCache.delete(templateName); // Ensure assets point to the new version
         rebuildStaticTemplateList().catch(err => {
             console.error('[template/upload] Failed to rebuild static list:', err);
         });
@@ -289,6 +290,7 @@ router.post('/sync-local', requireAdmin, async (req, res) => {
         }
 
         cachedTemplates = null;
+        assetVersionCache.clear(); // Clear all version caches since we did a bulk sync
         await rebuildStaticTemplateList();
         return res.json({ success: true, count: results.length, details: results });
     } catch (err) {
@@ -307,7 +309,7 @@ router.get('/list', async (_req, res) => {
             console.log(`[template/list] Cache MISS: Loaded ${cachedTemplates.length} templates from KV.`);
         }
 
-        res.set('Cache-Control', 'public, max-age=60'); // Browser caches for 1 minute
+        res.set('Cache-Control', 'no-cache'); // Disable cache for the list API to ensure reactivity
         return res.json({ success: true, templates: cachedTemplates });
     } catch (err) {
         console.error('[template/list]', err);
