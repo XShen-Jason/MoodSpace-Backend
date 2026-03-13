@@ -19,9 +19,9 @@ let memoryBlocklist = [];
 let blocklistLoaded = false;
 
 const QUOTA_DEFAULTS = {
-    'free': { limit: 1, dailyLimit: 5, minDomainLen: 3, label: '🌟 体验用户' },
-    'pro': { limit: 5, dailyLimit: 20, minDomainLen: 3, label: '💎 高级会员' },
-    'partner': { limit: 10, dailyLimit: 50, minDomainLen: 1, label: '👑 终身合伙人' },
+    'free': { limit: 1, dailyLimit: 3, minDomainLen: 3, label: '🌟 体验用户' },
+    'pro': { limit: 5, dailyLimit: 10, minDomainLen: 3, label: '💎 高级会员' },
+    'partner': { limit: 15, dailyLimit: 100, minDomainLen: 1, label: '👑 终身合伙人' },
     'admin': { limit: 999, dailyLimit: 999, minDomainLen: 1, label: '🛡️ 系统管理员' }
 };
 
