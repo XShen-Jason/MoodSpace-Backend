@@ -19,10 +19,10 @@ let memoryBlocklist = [];
 let blocklistLoaded = false;
 
 const QUOTA_DEFAULTS = {
-    'free': { limit: 1, dailyLimit: 3, minDomainLen: 3, label: '🌟 体验用户' },
-    'pro': { limit: 5, dailyLimit: 10, minDomainLen: 3, label: '💎 高级会员' },
-    'partner': { limit: 15, dailyLimit: 100, minDomainLen: 1, label: '👑 终身合伙人' },
-    'admin': { limit: 999, dailyLimit: 999, minDomainLen: 1, label: '🛡️ 系统管理员' }
+    'free': { limit: 1, dailyLimit: 3, minDomainLen: 3, allowHideFooter: false, label: '🌟 体验用户' },
+    'pro': { limit: 5, dailyLimit: 10, minDomainLen: 3, allowHideFooter: false, label: '💎 高级会员' },
+    'partner': { limit: 15, dailyLimit: 100, minDomainLen: 1, allowHideFooter: true, label: '👑 终身合伙人' },
+    'admin': { limit: 999, dailyLimit: 999, minDomainLen: 1, allowHideFooter: true, label: '🛡️ 系统管理员' }
 };
 
 let memoryQuotas = { ...QUOTA_DEFAULTS };
@@ -212,8 +212,9 @@ router.post('/render', async (req, res) => {
         const isUpdate = (authCheck.mode === 'UPDATE');
         const userTier = authCheck.tier || 'free';
 
-        // Force viral footer for free users
-        const finalShowViralFooter = userTier === 'free' ? true : (showViralFooter !== false);
+        // Force viral footer if tier doesn't allow hiding it
+        const allowHide = tierConfig?.allowHideFooter ?? false;
+        const finalShowViralFooter = allowHide ? (showViralFooter !== false) : true;
 
         // Tracking daily edits in profiles table
         if (isUpdate) {
@@ -408,6 +409,7 @@ router.get('/status/:userId', async (req, res) => {
         const maxDomains = tierConfig?.limit ?? 1;
         const maxDailyEdits = tierConfig?.dailyLimit ?? 5;
         const minDomainLen = tierConfig?.minDomainLen ?? 3;
+        const allowHideFooter = tierConfig?.allowHideFooter ?? false;
         const label = tierConfig?.label ?? '体验用户';
         
         const today = new Date().toISOString().split('T')[0];
@@ -422,7 +424,8 @@ router.get('/status/:userId', async (req, res) => {
                 maxDomains,
                 dailyUsedEdits,
                 maxDailyEdits,
-                minDomainLen
+                minDomainLen,
+                allowHideFooter
             }
         });
     } catch (err) {
