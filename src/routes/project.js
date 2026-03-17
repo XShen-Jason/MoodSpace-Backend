@@ -191,7 +191,7 @@ router.get('/config/tiers', async (req, res) => {
 // Admin only: Compares memory state with KV state and STAGES fresh data
 router.get('/config/sync-status', requireAdmin, async (req, res) => {
     try {
-        await ensureQuotas();
+        await Promise.all([ensureQuotas(), ensureBlocklist()]);
         const [kvQuotas, kvBlocklist] = await Promise.all([
             kvGet('__sys__quotas'),
             kvGet('__sys__blocklist')
