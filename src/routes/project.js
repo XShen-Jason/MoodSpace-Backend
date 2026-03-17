@@ -103,7 +103,7 @@ async function validateAndCheckQuota(userId, subdomain, template) {
     // Include 'template' to check for grandfathered-in access
     const { data: userProjects, error: fetchArrErr } = await supabase
         .from('projects')
-        .select('id, subdomain, template, updated_at')
+        .select('subdomain, template_type, updated_at')
         .eq('user_id', userId)
         .order('updated_at', { ascending: false });
 
@@ -126,8 +126,8 @@ async function validateAndCheckQuota(userId, subdomain, template) {
         }
 
         // Ownership verified (existingProject belongs to user). Check if it's the "Active/Latest" one.
-        const activeProjectId = userProjects[0]?.id;
-        if (existingProject.id !== activeProjectId) {
+        const activeProjectSubdomain = userProjects[0]?.subdomain;
+        if (existingProject.subdomain !== activeProjectSubdomain) {
             return {
                 isValid: false,
                 code: 4021,
@@ -137,7 +137,7 @@ async function validateAndCheckQuota(userId, subdomain, template) {
 
         // It is the latest project. Now check if the template being used is Free.
         // GRANDFATHERING POLICY: If the project was already using this template before it went Pro, allow it.
-        if (template && existingProject.template !== template) {
+        if (template && existingProject.template_type !== template) {
             const tmplMeta = await kvGet(`__tmpl__${template}`);
             if (tmplMeta && tmplMeta.tier !== 'free') {
                 return {
@@ -273,7 +273,6 @@ router.post('/config/update-user-tier', requireAdmin, async (req, res) => {
 
         if (error) throw error;
 
-        console.log(`[Admin] Updated user ${targetUserId} to tier "${tier}"`);
         return res.json({ success: true, message: `User tier successfully updated to ${tier}` });
     } catch (err) {
         console.error('[project/update-user-tier]', err);
@@ -469,7 +468,6 @@ router.get('/:subdomain', requireAdmin, async (req, res) => {
 router.get('/status/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
-        console.log(`[Status API] Request received for userId: ${userId} at ${new Date().toISOString()}`);
         if (!userId) return res.status(400).json({ error: 'Missing userId' });
 
         // Add headers to prevent caching of user status/quota
@@ -490,21 +488,19 @@ router.get('/status/:userId', async (req, res) => {
         const dbTier = (profile?.tier || '').toLowerCase();
         let tier = dbTier || (profile?.role === 'admin' ? 'admin' : 'free');
         if (tier && !memoryQuotas[tier]) tier = 'free'; 
-        
-        console.log(`[Debug Quota] User: ${userId}, Raw Tier: "${profile?.tier}", Role: "${profile?.role}", Final Tier: "${tier}"`);
 
         // 2. Fetch all user projects to check quota and identify active project
         const { data: userProjects, error: fetchErr } = await supabase
             .from('projects')
-            .select('id, subdomain, updated_at')
+            .select('subdomain, updated_at')
             .eq('user_id', userId)
             .order('updated_at', { ascending: false });
         
         if (fetchErr) throw new Error('Supabase Fetch Projects Error: ' + fetchErr.message);
         
         const count = userProjects?.length || 0;
-        const activeProjectId = userProjects?.[0]?.id || null;
-
+        const activeProjectSubdomain = userProjects?.[0]?.subdomain || null;
+        
         // 3. Get quota limits
         await ensureQuotas();
         const tierConfig = memoryQuotas[tier] || memoryQuotas['free'];
@@ -525,19 +521,11 @@ router.get('/status/:userId', async (req, res) => {
                 count,
                 maxDomains,
                 isOverQuota: count > maxDomains,
-                activeProjectId,
+                activeProjectId: activeProjectSubdomain,
                 dailyUsedEdits,
                 maxDailyEdits,
                 minDomainLen,
                 allowHideFooter
-            },
-            _debug: {
-                timestamp: new Date().toISOString(),
-                dbTier: profile?.tier,
-                dbRole: profile?.role,
-                finalTier: tier,
-                userId,
-                instanceId: process.env.INSTANCE_ID || process.pid
             }
         };
 
