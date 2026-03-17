@@ -501,7 +501,7 @@ router.get('/raw/:name', async (req, res) => {
 });
 
 // ── DELETE /api/template/:name ──────────────────────────────────────────────
-// Admin only: Purge a template's metadata from KV
+// Admin only: Purge a template's metadata from KV and cleanup R2
 router.delete('/:name', requireAdmin, async (req, res) => {
     try {
         const { name } = req.params;
@@ -512,16 +512,52 @@ router.delete('/:name', requireAdmin, async (req, res) => {
             return res.status(404).json({ error: `Template '${name}' not found` });
         }
 
-        // We use kvDelete to properly remove the key from Cloudflare
+        // 1. Check Usage in Supabase
+        const { count, error: countErr } = await supabase
+            .from('projects')
+            .select('*', { count: 'exact', head: true })
+            .eq('template_type', name);
+
+        if (countErr) {
+            console.error('[template/delete] Supabase check error:', countErr.message);
+        }
+
+        if (count > 0 && !req.query.force) {
+            return res.status(409).json({
+                error: 'Template in use',
+                message: `该模板正被 ${count} 个用户使用。删除将导致这些用户页面无法编辑/显示。若要强制删除，请确认。`,
+                usageCount: count
+            });
+        }
+
+        // 2. Delete from KV
         await kvDelete(key);
         
+        // 3. Trigger Background R2 Cleanup for this specific template
+        (async () => {
+            try {
+                const prefix = `templates/${name}/`;
+                const objects = await r2List(prefix);
+                if (objects.length > 0) {
+                    await r2DeleteObjects(objects);
+                    console.log(`[template/delete] Cleaned up ${objects.length} R2 objects for template: ${name}`);
+                }
+            } catch (cleanupErr) {
+                console.error(`[template/delete] Failed to cleanup R2 for ${name}:`, cleanupErr.message);
+            }
+        })();
+
         cachedTemplates = null;
         if (typeof assetVersionCache !== 'undefined') {
             assetVersionCache.delete(name);
         }
         await rebuildStaticTemplateList();
         
-        return res.json({ success: true, message: `Template '${name}' deleted from KV.` });
+        return res.json({ 
+            success: true, 
+            message: `Template '${name}' deleted clean.`,
+            usageCount: count
+        });
     } catch (err) {
         console.error('[template/delete]', err);
         return res.status(500).json({ error: err.message });
