@@ -349,18 +349,14 @@ async function renderProjectInternal({ subdomain, userId, type, data, showViralF
         throw new Error(`模板 ${type} 不存在或未发布`);
     }
 
-    // 3. Fetch Template base files from R2
-    const [htmlBuf, metaBuf] = await Promise.all([
-        r2Get(`templates/${type}/${meta.version}/index.html`),
-        r2Get(`templates/${type}/${meta.version}/config.json`)
-            .then(b => b || r2Get(`templates/${type}/${meta.version}/schema.json`)),
-    ]);
+    // 3. Fetch Template base HTML from R2
+    const htmlBuf = await r2Get(`templates/${type}/${meta.version}/index.html`);
 
     if (!htmlBuf) {
         throw new Error('核心模板源文件缺失');
     }
 
-    const schema = metaBuf ? JSON.parse(metaBuf.toString('utf-8')) : null;
+    const schema = { fields: meta.fields || [] };
 
     // 4. Render HTML with user data
     let rendered = injectData(htmlBuf.toString('utf-8'), data, schema);

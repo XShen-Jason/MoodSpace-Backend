@@ -69,10 +69,23 @@ async function r2Get(key) {
  */
 async function r2List(prefix) {
     const client = getClient();
-    const res = await client.send(
-        new ListObjectsV2Command({ Bucket: process.env.CF_R2_BUCKET, Prefix: prefix })
-    );
-    return (res.Contents ?? []).map((obj) => obj.Key);
+    let isTruncated = true;
+    let continuationToken = undefined;
+    const keys = [];
+
+    while (isTruncated) {
+        const res = await client.send(
+            new ListObjectsV2Command({ 
+                Bucket: process.env.CF_R2_BUCKET, 
+                Prefix: prefix,
+                ContinuationToken: continuationToken
+            })
+        );
+        keys.push(...(res.Contents ?? []).map((obj) => obj.Key));
+        isTruncated = res.IsTruncated;
+        continuationToken = res.NextContinuationToken;
+    }
+    return keys;
 }
 
 /**

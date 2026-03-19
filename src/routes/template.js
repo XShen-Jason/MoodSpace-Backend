@@ -16,6 +16,18 @@ const { injectData } = require('../utils/html');
 const { supabase } = require('../utils/supabase');
 const { renderProjectInternal, memoryQuotas } = require('./project');
 
+// Enqueue old template versions for Garbage Collection (24h delay to prevent 404s on cached edges)
+async function enqueueGarbageCollection(name, oldVersion) {
+    if (!oldVersion) return;
+    const gcKey = `__sys_gc_${name}_${oldVersion}`;
+    const gcData = {
+        prefix: `templates/${name}/${oldVersion}/`,
+        expireAt: Date.now() + 24 * 60 * 60 * 1000 // 24 hours
+    };
+    await kvPut(gcKey, gcData);
+    console.log(`[gc] Enqueued old version for deletion: ${gcData.prefix}`);
+}
+
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -143,6 +155,8 @@ router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
         let tier = 'free'; // Default to Free
         let price = 0;
         
+        let status = 'active';
+
         const metaFile = files.find((f) => f.fieldname === 'config.json' || f.fieldname === 'schema.json');
         if (metaFile) {
             try {
@@ -152,9 +166,15 @@ router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
                 if (schema.title) title = schema.title;
                 if (schema.tier === 'pro') tier = 'pro'; // Explicitly Pro
                 if (schema.price) price = schema.price;
+                if (schema.status) status = schema.status;
             } catch (e) {
                 console.warn(`[template/upload] Failed to parse config.json for ${templateName}`);
             }
+        }
+
+        const existingMeta = await kvGet(`__tmpl__${templateName}`);
+        if (existingMeta && existingMeta.version) {
+            await enqueueGarbageCollection(templateName, existingMeta.version);
         }
 
         // Register / update template metadata in KV
@@ -166,6 +186,7 @@ router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
             version,
             fields,
             static: isStatic,
+            status,
             updatedAt: new Date().toISOString(),
         });
 
@@ -240,17 +261,42 @@ router.post('/sync-local', requireAdmin, async (req, res) => {
                 const indexFile = Array.isArray(filesData) ? filesData.find(f => f.name === 'index.html') : null;
                 const configFile = Array.isArray(filesData) ? filesData.find(f => f.name === 'config.json' || f.name === 'schema.json') : null;
                 
-                // Combined SHA for detection (if either index or config changes, we sync)
+                // Combined SHA for detection
                 const newGitSha = `${indexFile?.sha || ''}-${configFile?.sha || ''}`;
 
-                // Optimization: Skip if Git SHA hasn't changed
+                // Optimization A: Skip if completely unchanged
                 if (existingMeta && existingMeta.gitSha === newGitSha && !req.body.force) {
                     console.log(`[sync/github] Template '${name}' unchanged (SHA: ${newGitSha}), skipping.`);
                     results.push({ name, version: existingMeta.version, source: 'github', skipped: true });
                     continue;
                 }
 
-                console.log(`[sync/github] Template '${name}' changed or new. Syncing...`);
+                // Optimization B: Decoupled Sync (Only config changed)
+                if (existingMeta && existingMeta.gitSha && existingMeta.gitSha.split('-')[0] === (indexFile?.sha || '') && configFile && !req.body.force) {
+                    console.log(`[sync/github] Template '${name}' config changed. Decoupled Syncing...`);
+                    const configRes = await fetch(configFile.download_url);
+                    const content = Buffer.from(await configRes.arrayBuffer());
+                    await r2Put(`templates/${name}/${existingMeta.version}/${configFile.name}`, content, 'application/json');
+                    
+                    const configJson = JSON.parse(content.toString('utf-8'));
+                    const fields = configJson?.fields ?? [];
+                    const isStatic = configJson?.static === true || fields.length === 0;
+                    const status = configJson?.status || 'active';
+
+                    await kvPut(`__tmpl__${name}`, {
+                        ...existingMeta,
+                        title: configJson?.title || name,
+                        tier: configJson?.tier === 'pro' ? 'pro' : 'free',
+                        price: configJson?.price || 0,
+                        fields, static: isStatic, status,
+                        updatedAt: new Date().toISOString(),
+                        gitSha: newGitSha
+                    });
+                    results.push({ name, version: existingMeta.version, source: 'github', method: 'decoupled' });
+                    continue;
+                }
+
+                console.log(`[sync/github] Template '${name}' HTML changed or new. Syncing...`);
                 
                 // Track files for this template
                 const uploadedFiles = [];
@@ -279,9 +325,14 @@ router.post('/sync-local', requireAdmin, async (req, res) => {
                 const title = configJson?.title || name;
                 const tier = configJson?.tier === 'pro' ? 'pro' : 'free';
                 const price = configJson?.price || 0;
+                const status = configJson?.status || 'active';
+
+                if (existingMeta && existingMeta.version) {
+                    await enqueueGarbageCollection(name, existingMeta.version);
+                }
 
                 await kvPut(`__tmpl__${name}`, {
-                    name, title, tier, price, version, fields, static: isStatic, 
+                    name, title, tier, price, version, fields, static: isStatic, status, 
                     updatedAt: new Date().toISOString(),
                     gitSha: newGitSha // Store SHA for next sync detection
                 });
@@ -303,16 +354,42 @@ router.post('/sync-local', requireAdmin, async (req, res) => {
                 if (!fs.existsSync(indexHtml)) continue;
 
                 const mtime = fs.statSync(indexHtml).mtimeMs;
+                const metaPath = [path.join(dirPath, 'config.json'), path.join(dirPath, 'schema.json')].find(p => fs.existsSync(p));
+                const mtimeConfig = metaPath ? fs.statSync(metaPath).mtimeMs : 0;
                 const existingMeta = await kvGet(`__tmpl__${name}`);
 
-                // Optimization: Skip if Local Modification Time hasn't changed
-                if (existingMeta && existingMeta.localMtime === mtime && !req.body.force) {
-                    console.log(`[sync/local] Template '${name}' unchanged (mtime: ${mtime}), skipping.`);
+                // Optimization A: Skip if completely unchanged
+                if (existingMeta && existingMeta.localMtime === mtime && existingMeta.localMtimeConfig === mtimeConfig && !req.body.force) {
+                    console.log(`[sync/local] Template '${name}' unchanged, skipping.`);
                     results.push({ name, version: existingMeta.version, source: 'local', skipped: true });
                     continue;
                 }
 
-                console.log(`[sync/local] Template '${name}' changed or new. Syncing...`);
+                // Optimization B: Decoupled Sync (Only config changed)
+                if (existingMeta && existingMeta.localMtime === mtime && existingMeta.localMtimeConfig !== mtimeConfig && metaPath && !req.body.force) {
+                    console.log(`[sync/local] Template '${name}' config changed. Decoupled Syncing...`);
+                    const content = fs.readFileSync(metaPath);
+                    await r2Put(`templates/${name}/${existingMeta.version}/${path.basename(metaPath)}`, content, 'application/json');
+                    
+                    const configJson = JSON.parse(content.toString('utf-8'));
+                    const fields = configJson?.fields ?? [];
+                    const isStatic = configJson?.static === true || fields.length === 0;
+                    const status = configJson?.status || 'active';
+
+                    await kvPut(`__tmpl__${name}`, {
+                        ...existingMeta,
+                        title: configJson?.title || name,
+                        tier: configJson?.tier === 'pro' ? 'pro' : 'free',
+                        price: configJson?.price || 0,
+                        fields, static: isStatic, status,
+                        updatedAt: new Date().toISOString(),
+                        localMtimeConfig: mtimeConfig
+                    });
+                    results.push({ name, version: existingMeta.version, source: 'local', method: 'decoupled' });
+                    continue;
+                }
+
+                console.log(`[sync/local] Template '${name}' HTML changed or new. Syncing...`);
 
                 const version = makeVersion();
                 const files = [];
@@ -334,7 +411,6 @@ router.post('/sync-local', requireAdmin, async (req, res) => {
                 }
 
                 let configJson = null;
-                const metaPath = [path.join(dirPath, 'config.json'), path.join(dirPath, 'schema.json')].find(p => fs.existsSync(p));
                 if (metaPath) configJson = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
 
                 const fields = configJson?.fields ?? [];
@@ -342,11 +418,17 @@ router.post('/sync-local', requireAdmin, async (req, res) => {
                 const title = configJson?.title || name;
                 const tier = configJson?.tier === 'pro' ? 'pro' : 'free';
                 const price = configJson?.price || 0;
+                const status = configJson?.status || 'active';
+
+                if (existingMeta && existingMeta.version) {
+                    await enqueueGarbageCollection(name, existingMeta.version);
+                }
 
                 await kvPut(`__tmpl__${name}`, {
-                    name, title, tier, price, version, fields, static: isStatic, 
+                    name, title, tier, price, version, fields, static: isStatic, status, 
                     updatedAt: new Date().toISOString(),
-                    localMtime: mtime // Store mtime for next sync detection
+                    localMtime: mtime,
+                    localMtimeConfig: mtimeConfig
                 });
                 results.push({ name, version, source: 'local' });
 
@@ -404,11 +486,20 @@ router.get('/list', async (_req, res) => {
             console.log(`[template/list] Cache MISS: Loaded ${cachedTemplates.length} templates from KV.`);
         }
 
-        // Allow CDN to cache list for 60s and serve stale up to 5 min.
-        // After a template upload/sync, cachedTemplates is set to null AND
-        // the VPS responds with a fresh list — so 60s lag is acceptable.
-        res.set('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
-        return res.json({ success: true, templates: cachedTemplates });
+        // Determine if requested by admin (to show offline templates)
+        const isAdmin = req.headers['x-admin-key'] === process.env.ADMIN_KEY;
+        
+        if (isAdmin) {
+            res.set('Cache-Control', 'no-store');
+            return res.json({ success: true, templates: cachedTemplates });
+        }
+
+        // Filter out non-active templates for public endpoints
+        const activeTemplates = cachedTemplates.filter(t => !t.status || t.status === 'active');
+        
+        // 24h CDN cache is safe since active templates are strictly controlled
+        res.set('Cache-Control', 'public, s-maxage=86400, stale-while-revalidate=86400');
+        return res.json({ success: true, templates: activeTemplates });
     } catch (err) {
         console.error('[template/list]', err);
         return res.status(500).json({ error: err.message });
@@ -501,52 +592,39 @@ router.delete('/:name', requireAdmin, async (req, res) => {
 });
 
 // ── POST /api/template/prune ─────────────────────────────────────────────
-// Admin only: Removes old versions of templates and orphaned data from R2.
+// Admin only: Removes old versions of templates by reading the O(1) GC Queue.
 router.post('/prune', requireAdmin, async (req, res) => {
     try {
-        console.log('[prune] Starting R2 storage optimization...');
+        console.log('[prune] Starting GC Queue processing...');
         
-        // 1. Get all active templates from KV (The Truth)
-        const keys = await kvList('__tmpl__');
-        const activeTemplates = new Map();
-        for (const k of keys) {
-            const meta = await kvGet(k);
-            if (meta) activeTemplates.set(meta.name, meta.version);
-        }
+        const gcKeys = await kvList('__sys_gc_');
+        let objectsDeleted = 0;
+        let prunedDirs = [];
+        const now = Date.now();
 
-        // 2. List all objects in the templates/ directory in R2
-        const allObjects = await r2List('templates/');
-        const toDelete = [];
+        for (const key of gcKeys) {
+            const gcData = await kvGet(key);
+            // Must have data and be expired (24h has passed)
+            if (!gcData || now < gcData.expireAt) continue;
 
-        // 3. Identify residual data
-        for (const key of allObjects) {
-            // Path structure: templates/{name}/{version}/{file}
-            const parts = key.split('/');
-            if (parts.length < 4) continue;
+            console.log(`[prune] Sweeping old directory: ${gcData.prefix}`);
             
-            const name = parts[1];
-            const version = parts[2];
-            
-            const activeVersion = activeTemplates.get(name);
-            
-            // If template no longer exists in KV OR this version is not the active one
-            if (!activeVersion || activeVersion !== version) {
-                toDelete.push(key);
+            // Delete files in exact specific old directory
+            const objects = await r2List(gcData.prefix);
+            if (objects.length > 0) {
+                await r2DeleteObjects(objects);
+                objectsDeleted += objects.length;
             }
-        }
-
-        console.log(`[prune] Identified ${toDelete.length} objects for deletion.`);
-        
-        // 4. Batch delete
-        if (toDelete.length > 0) {
-            await r2DeleteObjects(toDelete);
+            
+            await kvDelete(key);
+            prunedDirs.push(gcData.prefix);
         }
 
         return res.json({
             success: true,
             message: `Storage optimization complete.`,
-            objectsDeleted: toDelete.length,
-            templatesPruned: Array.from(new Set(toDelete.map(k => k.split('/')[1])))
+            objectsDeleted,
+            prunedDirs
         });
     } catch (err) {
         console.error('[template/prune]', err);
