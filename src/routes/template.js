@@ -15,6 +15,7 @@ const { makeVersion } = require('../utils/mime');
 const { injectData } = require('../utils/html');
 const { supabase } = require('../utils/supabase');
 const { renderProjectInternal, memoryQuotas } = require('./project');
+const { purgeCacheUrls } = require('../utils/cache');
 
 // Enqueue old template versions for Garbage Collection (24h delay to prevent 404s on cached edges)
 async function enqueueGarbageCollection(name, oldVersion) {
@@ -47,15 +48,21 @@ async function rebuildStaticTemplateList() {
         if (!cachedTemplates) {
             const keys = await kvList('__tmpl__');
             const metas = await Promise.all(keys.map((k) => kvGet(k)));
-            cachedTemplates = metas.filter(Boolean);
+            // Filter only active templates for the public JSON
+            cachedTemplates = metas.filter(m => m && (!m.status || m.status === 'active'));
+            cachedTemplatesAt = Date.now();
         }
+        
         const payload = JSON.stringify({ success: true, templates: cachedTemplates });
         const dir = path.dirname(STATIC_TEMPLATE_FILE);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(STATIC_TEMPLATE_FILE, payload, 'utf-8');
         console.log(`[template/list] Static file updated: ${STATIC_TEMPLATE_FILE} (${cachedTemplates.length} templates)`);
+        
+        // Optional: Purge CDN cache for the static file if FRONTEND_URL is set
+        const frontendUrl = process.env.FRONTEND_URL || `https://${process.env.CF_ZONE_NAME || 'moodspace.xyz'}`;
+        await purgeCacheUrls([`${frontendUrl}/templates.json`]);
     } catch (err) {
-        // Non-fatal: the API endpoint is still available as fallback
         console.error('[template/list] Failed to write static file:', err.message);
     }
 }
@@ -502,6 +509,34 @@ router.get('/list', async (_req, res) => {
         return res.json({ success: true, templates: activeTemplates });
     } catch (err) {
         console.error('[template/list]', err);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+// ── POST /api/template/refresh-gallery ────────────────────────────────────────
+// Admin only: Hard reset for the template gallery.
+// Clears in-memory cache, re-lists KV, rebuilds static file, and purges CDN.
+router.post('/refresh-gallery', requireAdmin, async (req, res) => {
+    try {
+        console.log('[template/refresh] Hard resetting template gallery cache...');
+        
+        // 1. Clear memory
+        cachedTemplates = null;
+        cachedTemplatesAt = 0;
+        
+        // 2. Clear version cache
+        if (typeof assetVersionCache !== 'undefined') assetVersionCache.clear();
+        
+        // 3. Rebuild (this calls purge internally)
+        await rebuildStaticTemplateList();
+        
+        return res.json({ 
+            success: true, 
+            message: '模板大厅缓存已重置，全国节点同步刷新中。',
+            count: cachedTemplates?.length || 0
+        });
+    } catch (err) {
+        console.error('[template/refresh-gallery]', err);
         return res.status(500).json({ error: err.message });
     }
 });

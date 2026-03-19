@@ -144,8 +144,10 @@ pm2 startup
 | Method | Path | Auth 鉴权请求头 | 功能描述 |
 |--------|------|------|-------------|
 | GET | `/health` | — | 心跳检查，供 Nginx/云监控确保服务存活 |
+| POST | `/api/template/refresh-gallery` | `X-Admin-Key` | 重写 templates.json 并刷新全网 CDN 缓存 |
+| POST | `/api/project/config/sync-all` | `X-Admin-Key` | 整合同步：刷新 VPS 的等级配额与黑名单内存 |
 | POST | `/api/template/upload` | `X-Admin-Key` | 手动以文件形式强制将本地模板注入到 R2 对象库 |
-| GET | `/api/template/list` | — | 无验证：前端拉取公开的图库列表页 |
+| GET | `/api/template/list` | — | 无验证：前端拉入图库列表（支持 CDN 强缓存）  |
 | GET | `/api/template/preview/:name` | — | 无验证：利用 `config.json` 预加载展示默认参数的演示页面 |
 | POST | `/api/project/render` | `X-Admin-Key` | 网页建造机：核心功能，执行渲染流程并注册 KV 域名路由 |
 | GET | `/api/project/:subdomain` | `X-Admin-Key` | 精确查询并提取 KV 路由内储藏的该用户的定制记录数据 |

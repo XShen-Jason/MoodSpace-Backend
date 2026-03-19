@@ -241,6 +241,52 @@ router.post('/config/refresh-blocklist', requireAdmin, async (req, res) => {
     }
 });
 
+// ── POST /api/project/config/sync-all ─────────────────────────────────────────
+// Admin only: Fetches BOTH quotas and blocklist from KV and refreshes memory in one go.
+// This is the integrated "Sync & Recon" action.
+router.post('/config/sync-all', requireAdmin, async (req, res) => {
+    try {
+        const [kvQuotas, kvBlocklist] = await Promise.all([
+            kvGet('__sys__quotas'),
+            kvGet('__sys__blocklist')
+        ]);
+
+        if (kvQuotas && typeof kvQuotas === 'object') {
+            lastSeenKvQuotas = JSON.stringify(kvQuotas);
+            // Reset to defaults before merging fresh KV data
+            memoryQuotas = { ...QUOTA_DEFAULTS };
+            for (const key in kvQuotas) {
+                if (typeof kvQuotas[key] === 'number') {
+                    memoryQuotas[key] = { ...memoryQuotas[key], limit: kvQuotas[key] };
+                } else if (typeof kvQuotas[key] === 'object') {
+                    memoryQuotas[key] = { ...memoryQuotas[key], ...kvQuotas[key] };
+                }
+            }
+            quotasLoaded = true;
+        }
+
+        if (Array.isArray(kvBlocklist)) {
+            lastSeenKvBlocklist = JSON.stringify(kvBlocklist);
+            memoryBlocklist = kvBlocklist.map(s => String(s).toLowerCase());
+            blocklistLoaded = true;
+        }
+
+        // Clear staged data as we are now fully synced
+        stagedQuotas = null;
+        stagedBlocklist = null;
+
+        return res.json({ 
+            success: true, 
+            message: '系统配置已完全同步到 VPS 内存',
+            quotasCount: Object.keys(memoryQuotas).length,
+            blocklistCount: memoryBlocklist.length
+        });
+    } catch (err) {
+        console.error('[project/sync-all]', err);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
 // ── POST /api/project/config/refresh-quotas ─────────────────────────────────────────────
 router.post('/config/refresh-quotas', requireAdmin, async (req, res) => {
     try {
