@@ -1,4 +1,4 @@
-name: Deploy RomanceSpace Backend to VPS
+name: Deploy Mood Space Backend to VPS
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
           script: |
-            cd /opt/RomanceSpace-Backend
+            cd /opt/MoodSpace-Backend
             git pull origin master
             npm install
-            pm2 restart romancespace-api
+            pm2 restart moodspace-api

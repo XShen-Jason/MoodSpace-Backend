@@ -471,11 +471,37 @@ router.get('/:subdomain', requireAdmin, async (req, res) => {
     }
 });
 
+// In-memory rate limiter for re-render endpoint (max 1 call per subdomain per 60s)
+// This is the VPS-side counterpart of the KV lock. They complement each other:
+// KV lock = prevents concurrent Worker calls; this = prevents sustained abuse patterns.
+const reRenderRateLimit = new Map(); // { subdomain: lastCalledTimestamp }
+const RERENDER_COOLDOWN_MS = 60_000; // 60 seconds
+
+function checkReRenderRateLimit(subdomain) {
+    const now = Date.now();
+    const last = reRenderRateLimit.get(subdomain) ?? 0;
+    if (now - last < RERENDER_COOLDOWN_MS) {
+        return false; // rate limited
+    }
+    reRenderRateLimit.set(subdomain, now);
+    return true; // allowed
+}
+
 // ── POST /api/project/re-render/:subdomain ──────────────────────────────────
 // Internal endpoint called by Cloudflare Worker (via waitUntil) for lazy re-rendering.
-// A KV-based lock prevents concurrent storms when many users visit a stale page at once.
+// Triple-gated: requireAdmin (key) + X-Internal-Source: worker + VPS rate limiter.
 router.post('/re-render/:subdomain', requireAdmin, async (req, res) => {
+    // Verify the request originates from our own Worker (second defense layer)
+    const internalSource = req.headers['x-internal-source'];
+    if (internalSource !== 'worker') {
+        return res.status(403).json({ success: false, message: 'Forbidden: internal endpoint' });
+    }
     const { subdomain } = req.params;
+    // VPS-side rate limit: max 1 re-render per subdomain per 60s (third defense layer)
+    if (!checkReRenderRateLimit(subdomain)) {
+        console.log(`[re-render/lazy] Rate limited: ${subdomain}`);
+        return res.status(429).json({ success: false, reason: 'rate_limited', message: 'Too many requests' });
+    }
     const lockKey = `__rerender_lock__${subdomain}`;
     try {
         // Check lock: if another re-render is in progress, bail out immediately.

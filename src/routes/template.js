@@ -20,6 +20,8 @@ const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
 let cachedTemplates = null;
+let cachedTemplatesAt = 0; // Timestamp of last cache fill
+const TEMPLATE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const assetVersionCache = new Map();
 
 // Path where the static template list JSON is written.
@@ -392,14 +394,20 @@ router.post('/sync-local', requireAdmin, async (req, res) => {
 // ── GET /api/template/list ────────────────────────────────────────────────────
 router.get('/list', async (_req, res) => {
     try {
-        if (!cachedTemplates) {
+        const now = Date.now();
+        const cacheExpired = !cachedTemplates || (now - cachedTemplatesAt > TEMPLATE_CACHE_TTL_MS);
+        if (cacheExpired) {
             const keys = await kvList('__tmpl__');
             const metas = await Promise.all(keys.map((k) => kvGet(k)));
             cachedTemplates = metas.filter(Boolean);
+            cachedTemplatesAt = now;
             console.log(`[template/list] Cache MISS: Loaded ${cachedTemplates.length} templates from KV.`);
         }
 
-        res.set('Cache-Control', 'no-cache'); // Disable cache for the list API to ensure reactivity
+        // Allow CDN to cache list for 60s and serve stale up to 5 min.
+        // After a template upload/sync, cachedTemplates is set to null AND
+        // the VPS responds with a fresh list — so 60s lag is acceptable.
+        res.set('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
         return res.json({ success: true, templates: cachedTemplates });
     } catch (err) {
         console.error('[template/list]', err);
@@ -417,7 +425,9 @@ router.get('/raw/:name', async (req, res) => {
         const htmlBuf = await r2Get(`templates/${name}/${meta.version}/index.html`);
         if (!htmlBuf) return res.status(404).json({ error: 'Template HTML missing in R2' });
 
-        res.set('Cache-Control', 'public, max-age=3600');
+        // Template files are content-addressed (versioned by `meta.version`).
+        // 24h CDN cache is safe: the version key changes on every upload.
+        res.set('Cache-Control', 'public, max-age=86400, stale-while-revalidate=3600');
         res.set('Content-Type', 'text/plain;charset=UTF-8');
         return res.send(htmlBuf.toString('utf-8'));
     } catch (err) {

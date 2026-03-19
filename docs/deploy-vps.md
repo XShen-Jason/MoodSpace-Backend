@@ -86,7 +86,7 @@ CF_KV_NAMESPACE_ID=726287eac5274a80b9df18217d43b0f0
 CF_R2_BUCKET=romancespace-templates
 CF_R2_ACCESS_KEY_ID=[填写刚刚新建的 R2 访问密钥 ID]
 CF_R2_SECRET_ACCESS_KEY=[填写刚刚新建的 R2 机密访问密钥]
-CF_R2_ENDPOINT=https://05a5c87d8fc5a9ccfa0dfa0600ea06cc.r2.cloudflarestorage.com
+CF_R2_ENDPOINT=https://<新 CF Account ID>.r2.cloudflarestorage.com
 
 # ── Supabase (防白嫖、计次扣费、抢注隔离墙) ─────────────────────
 SUPABASE_URL=https://djcfqtrbfjaykdyperpf.supabase.co

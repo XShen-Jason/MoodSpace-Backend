@@ -1,7 +1,7 @@
 {
-    "name": "romancespace-backend",
+    "name": "moodspace-backend",
     "version": "1.0.0",
-    "description": "RomanceSpace VPS Backend API — CQRS write-side",
+    "description": "Mood Space VPS Backend API — CQRS write-side",
     "main": "src/app.js",
     "scripts": {
         "start": "node src/app.js",
