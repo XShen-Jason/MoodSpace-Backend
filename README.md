@@ -1,77 +1,161 @@
-# RomanceSpace Backend
+# 🛡️ MoodSpace 后端 API (Node.js)
 
-VPS API server — CQRS write-side. Handles all writes to Cloudflare R2/KV. The Cloudflare Worker is read-only.
+本仓库是 MoodSpace 平台的核心中枢系统（CQRS 架构中的“写入端”）。
+它负责处理所有复杂业务：校验用户权限、同步 GitHub 模板、向 Cloudflare R2 保存模板源文件、向 Cloudflare KV 写入防碰撞的用户路由，并对接 Supabase 数据库管理用户配额。
 
-## Stack
+> **小白提示**：这里的代码**不直接面临用户的海量高并发访问**。所有的前台高并发都由 Worker 挡在前面，只有当用户需要“新生成一个网页”或平台要“同步一个新模板”时，才会调用这里的接口。
 
-- Node.js + Express
-- `@aws-sdk/client-s3` → Cloudflare R2 (S3-compatible)
-- Cloudflare KV REST API
-- Cloudflare Cache Purge API (CDN invalidation)
-- Supabase (future: user auth & data)
+---
 
-## Quick Start
+## 🏗️ 核心技术栈
+- **运行时环境**: Node.js (v20+)
+- **后端引擎**: Express.js
+- **存储对象库**: `@aws-sdk/client-s3` (用于连接 Cloudflare R2，因为 R2 兼容 S3 标准)
+- **缓存与路由**: Cloudflare KV REST API
+- **CDN 联动**: Cloudflare Cache Purge API (负责一键清理全网节点缓存)
+- **业务数据库**: Supabase (用于用户认证、管理账号注册和使用额度)
 
+---
+
+## 💻 开发者：本地运行指南
+
+如果你想在本地开发修改后端代码：
+
+1. **克隆代码到本地**：
+   ```bash
+   git clone https://github.com/XShen-Jason/MoodSpace-Backend.git
+   cd MoodSpace-Backend
+   ```
+2. **安装依赖**：
+   ```bash
+   npm install
+   ```
+2. **准备环境变量**：
+   ```bash
+   cp .env.example .env
+   ```
+   *对照下方的“环境变量保姆级配置详解”填入你的测试配置。*
+3. **启动热更新服务**：
+   ```bash
+   npm run dev
+   ```
+   服务默认会在本地 `http://localhost:3000` 启动。
+
+---
+
+## ⚙️ 环境变量保姆级配置详解 (.env)
+
+小白最容易卡在找这些长串密钥上，请严格按照以下步骤去相应的控制台寻找并填写：
+
+### 1. 基础服务器属性
+- `PORT=3000`：本地或 VPS 运行的端口，保持默认即可。
+- `APP_NAME="Mood Space"`：你的网站品牌名。这个名字会动态显示在用户生成的网页底部的“引流小尾巴”上。
+- `FRONTEND_URL=https://www.moodspace.xyz`：你的前端主站网址。由于生成的分享链接带你的域名，后端需要知道。
+- `FRONTEND_DIST_PATH=/opt/MoodSpace-Frontend/dist`：前端静态文件在 VPS 上的**绝对路径**。万一 Nginx 失效，后端能够顶上，临时充当前端静态文件的分发服务器。
+
+### 2. 超级管理员防盗刷密码
+- `ADMIN_KEY=（自己创造一串英文字母+数字的强密码）`
+- **作用**：全平台所有的“写入”操作的唯一通行证。你必须把这个密码填在这里，**同时再去 Cloudflare Worker 的 Settings 里添加同名的 Secret**，防止别人滥用接口恶意发包。
+
+### 3. Supabase 数据库（管理用户及使用次数）
+去 Supabase 你的项目里，左侧栏点击 ⚙️ **Project Settings -> API**。
+- `SUPABASE_URL=（你的 Project URL，形如 https://xxx.supabase.co）`
+- `SUPABASE_SERVICE_ROLE_KEY=（在这个页面里找到名为 service_role 的超长密钥）`
+- 🚨 **警告**：`service_role_key` 拥有无视一切数据安全规则的“神权”，**这串钥匙只能存在于后端的 `.env` 里，绝对绝对不能出现在前端代码里！**
+
+### 4. Cloudflare 全局账户与边缘缓存清理
+- `CF_ACCOUNT_ID=(1)`：登录 CF -> 随便点进一个你的域名概览页 -> 右下角找 "Account ID"（账户 ID）。
+- `CF_ZONE_ID=(2)`：在同一个页面，找到 "Zone ID"。
+- `CF_API_TOKEN=(3)`：去右上角点头像 -> My Profile -> API Tokens -> Create Token (Custom)。
+  - **权限列表** (严格只给这两个，不要多也不要少)：`Workers KV Storage: Edit` 加 `Zone: Cache Purge: Purge`。
+  - **重要性**：没有这个权限，后台功能在更新黑名单或删除用户页面时，无法联动刷新全球节点网络，会导致修改不生效！
+
+### 5. Cloudflare 存储桶配置 (KV & R2)
+- `CF_KV_NAMESPACE_ID=(4)`：去 CF 左侧边栏 -> Workers & Pages -> KV，找到你为项目创建的 `MOODSPACE_KV`，复制旁边那一串 32 位的 Namespace ID。
+- `CF_R2_BUCKET=moodspace-templates`：必须和你在 CF R2 里创建的存储桶名字一个字不差。
+- `CF_R2_ENDPOINT=https://你的_CF_32位_账户ID.r2.cloudflarestorage.com`
+- `CF_R2_ACCESS_KEY_ID` & `CF_R2_SECRET_ACCESS_KEY`：这需要回到 CF R2 主页面，点击右侧的 "Manage R2 API Tokens"。申请一组只能操作 R2 增删改查的专用 S3 小秘钥。
+
+---
+
+## 🚀 生产环境全景部署 (VPS)
+
+如果这是你第一次在全新的 Ubuntu VPS 上部署：
+
+### 1. Node.js 与 PM2 安装包
 ```bash
-npm install
-cp .env.example .env   # fill in all values
-npm run dev            # node --watch (Node 18+)
+sudo apt update && sudo apt install -y git curl npm
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+sudo npm install -g pm2
 ```
 
-Server listens on `http://0.0.0.0:3000` by default.
+### 2. 拉取代码并启动守护进程
+```bash
+cd /opt
+sudo git clone https://github.com/XShen-Jason/MoodSpace-Backend.git
+cd MoodSpace-Backend
+sudo npm install
+cp .env.example .env
+sudo nano .env  # 填入上方讲解过的所有变量
 
-## API Endpoints
+# 使用大写开头的进程名，与后期的自动化 CI 严格匹配！
+pm2 start src/app.js --name "MoodSpace-api"
+pm2 save
+pm2 startup
+```
 
-| Method | Path | Auth | Description |
+### 3. 自动化部署 (CI/CD)
+本项目已配置了精准触发的 GitHub Actions。只要你在本地向 GitHub 推送代码，GitHub 服务器就会通过 SSH 自动连进你的 VPS，帮你完成拉取并 `pm2 restart MoodSpace-api`。
+- **你需要做的是**：去项目的 GitHub 页面 -> Settings -> Secrets and variables -> Actions，配置 `SSH_HOST` (IP地址)、`SSH_USER` (通常为 root) 以及 `SSH_KEY` (你的私钥)。
+
+---
+
+## 🛠️ KV 初始数据配置 (核心步骤！必须做)
+
+既然你已跑通后台，要激活项目自带的**域名黑名单**和**动态会员收费权限**功能，请顺手移步到 Cloudflare DashBoard -> KV -> `MOODSPACE_KV` -> Add entry 进行手工填写：
+
+1. **录入系统黑名单 (防止用户乱起名顶掉系统关键骨架)**：
+   - Key (键)：`__sys__blocklist`
+   - Value (值，必须是 JSON 数组)：`["spam", "admin", "www", "api"]`
+
+2. **录入全局会员等级套餐属性**：
+   - Key (键)：`__sys__quotas`
+   - Value (值，严格粘贴以下完整架构，注意标点，可以动态增加或减少)：
+     ```json
+     {"free": {"limit": 1, "dailyLimit": 3, "minDomainLen": 3, "allowHideFooter": false, "label": "🌟 体验用户"}, "pro": {"limit": 5, "dailyLimit": 10, "minDomainLen": 3, "allowHideFooter": true, "label": "💎 高级会员"}}
+     ```
+
+---
+
+## 📡 核心极客专区：开放 API 端点清单
+
+如果你打算二次开发其他客户端，可直接调用此服务：
+
+| Method | Path | Auth 鉴权请求头 | 功能描述 |
 |--------|------|------|-------------|
-| GET | `/health` | — | Health check |
-| POST | `/api/template/upload` | X-Admin-Key | Upload template files to R2 |
-| GET | `/api/template/list` | — | List all registered templates |
-| GET | `/api/template/preview/:name` | — | Preview template with schema defaults |
-| POST | `/api/project/render` | X-Admin-Key | Render & store user page to R2 |
-| GET | `/api/project/:subdomain` | X-Admin-Key | Get project config from KV |
+| GET | `/health` | — | 心跳检查，供 Nginx/云监控确保服务存活 |
+| POST | `/api/template/upload` | `X-Admin-Key` | 手动以文件形式强制将本地模板注入到 R2 对象库 |
+| GET | `/api/template/list` | — | 无验证：前端拉取公开的图库列表页 |
+| GET | `/api/template/preview/:name` | — | 无验证：利用 `config.json` 预加载展示默认参数的演示页面 |
+| POST | `/api/project/render` | `X-Admin-Key` | 网页建造机：核心功能，执行渲染流程并注册 KV 域名路由 |
+| GET | `/api/project/:subdomain` | `X-Admin-Key` | 精确查询并提取 KV 路由内储藏的该用户的定制记录数据 |
 
-### POST /api/template/upload
-
+### [附录] 终端 API 调用范例
+**上传模板 (`POST /api/template/upload`)：**
 ```bash
 curl -X POST http://localhost:3000/api/template/upload \
-  -H "X-Admin-Key: your-key" \
+  -H "X-Admin-Key: 你的超神密钥" \
   -F "templateName=love_letter" \
   -F "index.html=@./index.html" \
   -F "config.json=@./config.json"
 ```
 
-Response: `{ success, templateName, title, version, fields, filesUploaded, previewUrl }`
-
-### POST /api/project/render
-
+**触发渲染建立专属网页 (`POST /api/project/render`)：**
 ```bash
 curl -X POST http://localhost:3000/api/project/render \
-  -H "X-Admin-Key: your-key" \
+  -H "X-Admin-Key: 你的超神密钥" \
   -H "Content-Type: application/json" \
   -d '{"subdomain":"sweeties","type":"love_letter","data":{"title":"Hello Darling"}}'
 ```
-
-Response: `{ success, subdomain, url, previewUrl, isUpdate }`
-
-## Environment Variables
-
-See `.env.example` for all required variables.
-
-## Deploy (VPS)
-
-```bash
-# Install PM2 globally
-npm install -g pm2
-
-# Start with PM2
-pm2 start src/app.js --name romancespace-backend
-pm2 save
-pm2 startup
-```
-
-## What's NOT yet implemented (to do later)
-
-- **Supabase integration**: user auth, user data storage (env vars pre-configured)
-- **Async batch re-render**: when a template is updated, old user pages are NOT automatically re-rendered yet (a log warning is printed instead). Needs a job queue (BullMQ + Redis).
-- **Rate limiting / HTTPS**: use nginx or Caddy as a reverse proxy in production
+*(响应会返回包含直接存有生成网页全球访问 CDN 地址的 JSON 体)*
