@@ -23,4 +23,4 @@ jobs:
             cd /opt/MoodSpace-Backend
             git pull origin master
             npm install
-            pm2 restart moodspace-api
+            pm2 restart MoodSpace-api
