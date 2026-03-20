@@ -143,7 +143,11 @@ router.post('/create', async (req, res) => {
 
         if (insertErr) {
             console.error('[payment/create] DB Insert Error:', insertErr);
-            throw new Error('Failed to create order in database');
+            return res.status(500).json({ 
+                success: false, 
+                error: `Failed to create order in database: ${insertErr.message || 'Unknown DB error'}`,
+                details: insertErr.details || null
+            });
         }
 
         // 5. Generate Payment URL (Real ZhifuFM integration)
