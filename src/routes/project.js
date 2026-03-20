@@ -113,7 +113,12 @@ async function validateAndCheckQuota(userId, subdomain, template) {
     if (fetchArrErr) throw new Error('Supabase Projects Fetch Error: ' + fetchArrErr.message);
 
     const currentProjectCount = userProjects?.length || 0;
-    const maxDomains = tierConfig?.limit || 1;
+    const { count: inviteCount } = await supabase
+        .from('profiles')
+        .select('id', { count: 'exact', head: true })
+        .eq('invited_by', userId);
+
+    const maxDomains = (tierConfig?.limit || 1) + (inviteCount || 0);
     const existingProject = userProjects?.find(p => p.subdomain === subLow);
     const today = new Date().toISOString().split('T')[0];
 
@@ -623,10 +628,15 @@ router.get('/status/:userId', async (req, res) => {
         const count = userProjects?.length || 0;
         const activeProjectSubdomain = userProjects?.[0]?.subdomain || null;
         
-        // 3. Get quota limits
+        // 3. Get quota limits (including invite bonuses)
+        const { count: inviteCount } = await supabase
+            .from('profiles')
+            .select('id', { count: 'exact', head: true })
+            .eq('invited_by', userId);
+
         await ensureQuotas();
         const tierConfig = memoryQuotas[tier] || memoryQuotas['free'];
-        const maxDomains = tierConfig?.limit ?? 1;
+        const maxDomains = (tierConfig?.limit ?? 1) + (inviteCount || 0);
         const maxDailyEdits = tierConfig?.dailyLimit ?? 5;
         const minDomainLen = tierConfig?.minDomainLen ?? 3;
         const allowHideFooter = tierConfig?.allowHideFooter ?? false;
