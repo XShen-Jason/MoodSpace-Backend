@@ -23,7 +23,8 @@ router.get('/pricing', async (req, res) => {
         const { data, error } = await supabase
             .from('pricing_configs')
             .select('*')
-            .eq('is_active', true);
+            .eq('is_active', true)
+            .order('sort_order', { ascending: true });
             
         if (error) throw error;
         return res.json({ success: true, data });
@@ -77,14 +78,29 @@ router.post('/create', async (req, res) => {
             return res.status(400).json({ success: false, error: 'Invalid or inactive pricing tier' });
         }
 
-        // 3. Math & Sanity Check (Amounts are in CENTS)
-        // Here we apply discount logic. (For simplicity, using base_price * discount_rate, ignoring first_month for now)
-        const baseAmount = config.base_price;
-        const discountRate = parseFloat(config.discount_rate) || 1.0;
-        let actualAmount = Math.floor(baseAmount * discountRate);
+        // 3. Determine actual amount (First month vs Renewal)
+        // Fetch user's current tier to decide which price to use
+        const { data: profile } = await supabase
+            .from('profiles')
+            .select('tier')
+            .eq('id', userId)
+            .maybeSingle();
+        
+        const isRenewal = profile && profile.tier && profile.tier.toLowerCase() === tier.toLowerCase();
+        
+        let actualAmount;
+        if (isRenewal && config.renewal_price) {
+            actualAmount = config.renewal_price;
+        } else if (config.first_month_price) {
+            actualAmount = config.first_month_price;
+        } else {
+            // Fallback to base price if no specific prices are set
+            const discount = parseFloat(config.discount_rate) || 1.0;
+            actualAmount = Math.floor(config.base_price * discount);
+        }
 
         // Sanity check constraints
-        if (actualAmount <= 0 || actualAmount > 10000000) { // arbitrary 100k RMB cap
+        if (actualAmount <= 0 || actualAmount > 1000000) { // 10k RMB safety cap
             return res.status(400).json({ success: false, error: 'Calculated amount fails safety constraints' });
         }
 
@@ -97,7 +113,7 @@ router.post('/create', async (req, res) => {
             .insert({
                 user_id: userId,
                 order_no: orderNo,
-                original_amount: baseAmount,
+                original_amount: config.base_price, // ← was `baseAmount` (undefined) — now correctly uses config.base_price
                 actual_amount: actualAmount,
                 pay_type: payType || 'alipay',
                 target_tier: tier,
@@ -198,30 +214,31 @@ router.all('/notify', async (req, res) => {
 
         const { state, merchantNum, orderNo: incOrderNo, amount: incAmount, sign: incomingSign, platformOrderNo } = payload;
         
+        const orderNo = incOrderNo || payload.out_trade_no;
+        const thirdPartyNo = platformOrderNo || payload.trade_no;
+
+        if (!orderNo) {
+            return res.status(400).send("fail");
+        }
+
+        // Fast-exit: only process successful payment notifications (state=1)
+        // ZhifuFM state: 1=success, others are non-actionable
+        if (String(state) !== '1') {
+            console.log('[payment/notify] Ignoring notification with state:', state);
+            return res.status(200).send("success");
+        }
+
         // 1. Signature Verification
         // MD5: state + merchantNum + orderNo + amount + secret_key
         const signStr = `${state}${merchantNum}${incOrderNo}${incAmount}${SECRET_KEY}`;
         const computedSign = crypto.createHash('md5').update(signStr, 'utf8').digest('hex').toLowerCase();
         
-        // Use crypto timingSafeEqual to avoid timing attacks if possible, but basic equality is fine for md5
         const isValid = (computedSign === incomingSign && merchantNum === MERCHANT_NUM);
 
-        const orderNo = incOrderNo || payload.out_trade_no;
-        // ZhifuFM amount is string in yuan, parse back to int CENTS 
-        const paidAmount = parseInt(parseFloat(incAmount || payload.total_fee || '0') * 100, 10);
-        const thirdPartyNo = platformOrderNo || payload.trade_no || 'TID_UNKNOWN';
+        // ZhifuFM amount is string in yuan, parse back to int CENTS
+        const paidAmount = parseInt(parseFloat(incAmount || '0') * 100, 10);
 
-        if (!orderNo) {
-            return res.status(400).send("fail");
-        }
-        
-        // As per docs: "state 1: 付款成功"
-        if (String(state) !== '1') {
-            console.log('[payment/notify] Ignoring notification with state:', state);
-            return res.status(200).send("success"); // Confirmed receipt but ignored as not success
-        }
-
-        // 2. Log Payload
+        // 2. Log Payload (always log to help debugging, even for invalid)
         await supabase.from('payment_logs').insert({
             order_no: orderNo,
             provider: 'zhifufm',
@@ -231,19 +248,27 @@ router.all('/notify', async (req, res) => {
         });
 
         if (!isValid) {
+            console.warn('[payment/notify] Invalid signature for order:', orderNo);
             return res.status(400).send("fail"); // Malicious payload
         }
 
         // 3. Push to Durable Queue (payment_jobs)
-        // We UPSERT to avoid crashing on duplicate webhooks, relying on queue idempotency
+        // Use the third-party platform order no as idempotency key to absorb duplicate webhooks.
+        // If the same platformOrderNo fires 20 times, only one job row is stored.
+        const idempotencyKey = thirdPartyNo || orderNo; // fallback to our own order_no
         const { error: jobErr } = await supabase.from('payment_jobs').upsert(
-            { order_no: orderNo, status: 'pending' },
-            { onConflict: 'order_no', ignoreDuplicates: true }
+            { 
+                order_no: orderNo,
+                idempotency_key: idempotencyKey,
+                paid_amount: paidAmount,
+                third_party_no: thirdPartyNo || 'TID_UNKNOWN',
+                status: 'pending'
+            },
+            { onConflict: 'idempotency_key', ignoreDuplicates: true }
         );
 
         if (jobErr) {
             console.error('[payment/notify] Failed to persist job:', jobErr);
-            // Even if queue fails occasionally, active polling cron can recover it later.
         }
 
         // 4. Immediate Return for ZhifuFM (L6.5 Async Engine)
@@ -305,11 +330,10 @@ router.get('/history', async (req, res) => {
 
 /**
  * GET /api/payment/admin/orders
- * Fetch all orders for management
+ * Fetch all orders for management — admin only
  */
-router.get('/admin/orders', async (req, res) => {
+router.get('/admin/orders', requireAdminKey, async (req, res) => {
     try {
-        // Assume requireAdmin middleware would protect this in reality
         const { data: orders, error } = await supabase
             .from('orders')
             .select('*')
@@ -351,6 +375,85 @@ router.post('/admin/compensate', async (req, res) => {
         return res.json({ success: true, message: 'Granted successfully' });
     } catch (err) {
         return res.status(500).json({ success: false, error: 'Compensation failed' });
+    }
+});
+
+// Shared admin key middleware for pricing routes
+function requireAdminKey(req, res, next) {
+    const key = req.headers['x-admin-key'];
+    if (!key || key !== process.env.ADMIN_KEY) {
+        return res.status(403).json({ success: false, error: 'Forbidden: invalid admin key' });
+    }
+    next();
+}
+
+/**
+ * GET /api/payment/admin/pricing
+ * Fetch all pricing configs (including inactive ones) — admin only
+ */
+router.get('/admin/pricing', requireAdminKey, async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('pricing_configs')
+            .select('*')
+            .order('sort_order', { ascending: true });
+        if (error) throw error;
+        return res.json({ success: true, data });
+    } catch (err) {
+        return res.status(500).json({ success: false, error: 'Failed to fetch' });
+    }
+});
+
+/**
+ * POST /api/payment/admin/pricing
+ * Create or update a pricing configuration — admin only
+ */
+router.post('/admin/pricing', requireAdminKey, async (req, res) => {
+    try {
+        const { id, tier, duration_months, display_name, base_price, first_month_price, renewal_price, discount_label, is_active, sort_order } = req.body;
+        
+        if (!tier || duration_months == null || base_price == null) {
+            return res.status(400).json({ success: false, error: 'Missing required fields: tier, duration_months, base_price' });
+        }
+
+        const payload = {
+            tier,
+            duration_months: parseInt(duration_months),
+            display_name: display_name || null,
+            base_price: parseInt(base_price),
+            first_month_price: first_month_price ? parseInt(first_month_price) : null,
+            renewal_price: renewal_price ? parseInt(renewal_price) : null,
+            discount_label: discount_label || null,
+            is_active: is_active !== undefined ? Boolean(is_active) : true,
+            sort_order: sort_order ? parseInt(sort_order) : 0,
+            updated_at: new Date().toISOString()
+        };
+
+        let result;
+        if (id) {
+            result = await supabase.from('pricing_configs').update(payload).eq('id', id).select();
+        } else {
+            result = await supabase.from('pricing_configs').insert(payload).select();
+        }
+
+        if (result.error) throw result.error;
+        return res.json({ success: true, data: result.data[0] });
+    } catch (err) {
+        console.error('[Admin Pricing] Error:', err);
+        return res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+/**
+ * DELETE /api/payment/admin/pricing/:id — admin only
+ */
+router.delete('/admin/pricing/:id', requireAdminKey, async (req, res) => {
+    try {
+        const { error } = await supabase.from('pricing_configs').delete().eq('id', req.params.id);
+        if (error) throw error;
+        return res.json({ success: true });
+    } catch (err) {
+        return res.status(500).json({ success: false, error: err.message });
     }
 });
 
