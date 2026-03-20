@@ -16,6 +16,8 @@ const rateLimit = require('express-rate-limit');
 
 const templateRouter = require('./routes/template');
 const { router: projectRouter } = require('./routes/project');
+const paymentRouter = require('./routes/payment');
+const { startPaymentEngine } = require('./cron_jobs');
 
 const app = express();
 
@@ -57,6 +59,7 @@ app.get('/health', (_req, res) => {
 app.use('/api/', apiLimiter);
 app.use('/api/template', templateRouter);
 app.use('/api/project', projectRouter);
+app.use('/api/payment', paymentRouter);
 
 // ── Template Asset Serving (NOT rate-limited — public CDN-like route) ────────
 // Serves CSS/JS/images for templates from R2 via /assets/:type/:filepath
@@ -83,6 +86,8 @@ app.use((err, _req, res, _next) => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT ?? 3000;
 app.listen(PORT, () => {
+    // Start L6.5 Payment Worker
+    startPaymentEngine();
     console.log(`[backend-api] Listening on http://0.0.0.0:${PORT}`);
     console.log(`[backend-api] Serving frontend from: ${FRONTEND_DIST}`);
 });
