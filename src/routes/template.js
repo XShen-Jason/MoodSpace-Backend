@@ -36,6 +36,7 @@ let cachedTemplates = null;
 let cachedTemplatesAt = 0; // Timestamp of last cache fill
 const TEMPLATE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const assetVersionCache = new Map();
+const NAME_REGEX = /^[a-z0-9_]+$/;
 
 // Path where the static template list JSON is written.
 // Nginx serves this file directly at /templates.json — sub-5ms, zero Node.js overhead.
@@ -134,7 +135,7 @@ async function commitToGitHub(templateName, files) {
 router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
     try {
         const templateName = (req.body.templateName ?? '').trim();
-        if (!templateName || !/^[a-z0-9_]+$/.test(templateName)) {
+        if (!templateName || !NAME_REGEX.test(templateName)) {
             return res.status(400).json({
                 error: 'templateName must contain only lowercase letters, numbers, or underscores',
             });
@@ -255,6 +256,10 @@ router.post('/sync-local', requireAdmin, async (req, res) => {
             const folders = contents.filter(c => c.type === 'dir').map(c => c.name);
 
             for (const name of folders) {
+                if (!NAME_REGEX.test(name)) {
+                    console.warn(`[sync/github] Skipping '${name}': naming violation (lowercase, numbers, underscores only).`);
+                    continue;
+                }
                 const version = makeVersion();
 
                 // 1. Fetch current metadata to check for changes
@@ -356,6 +361,10 @@ router.post('/sync-local', requireAdmin, async (req, res) => {
                 .map(d => d.name);
 
             for (const name of dirs) {
+                if (!NAME_REGEX.test(name)) {
+                    console.warn(`[sync/local] Skipping '${name}': naming violation (lowercase, numbers, underscores only).`);
+                    continue;
+                }
                 const dirPath = path.join(localPath, name);
                 const indexHtml = path.join(dirPath, 'index.html');
                 if (!fs.existsSync(indexHtml)) continue;
