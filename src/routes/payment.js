@@ -1,6 +1,6 @@
 const express = require('express');
 const crypto = require('crypto');
-const { supabase } = require('../utils/supabase');
+const { supabase, getProfileWithSubscriptionSync } = require('../utils/supabase');
 
 // For node-fetch v3 (ESM) in CJS environment
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
@@ -23,6 +23,8 @@ function generateOrderNo(userId) {
  */
 router.get('/pricing', async (req, res) => {
     try {
+        const { userId } = req.query;
+
         const { data, error } = await supabase
             .from('pricing_configs')
             .select('*')
@@ -30,7 +32,21 @@ router.get('/pricing', async (req, res) => {
             .order('sort_order', { ascending: true });
             
         if (error) throw error;
-        return res.json({ success: true, data });
+
+        let profile = null;
+        if (userId) {
+            profile = await getProfileWithSubscriptionSync(userId);
+        }
+
+        const enriched = data.map(config => {
+            const isRenewal = profile && 
+                             profile.tier === config.tier && 
+                             profile.subscription_expires_at && 
+                             new Date(profile.subscription_expires_at) > new Date();
+            return { ...config, is_renewal: !!isRenewal };
+        });
+
+        return res.json({ success: true, data: enriched });
     } catch (err) {
         console.error('[payment/pricing] Error:', err);
         return res.status(500).json({ success: false, error: 'Failed to load pricing configs.' });
@@ -54,36 +70,7 @@ router.post('/create', async (req, res) => {
             return res.status(400).json({ success: false, error: "duration_months must be a number" });
         }
 
-        // 1. Check for existing pending order (Deduplication)
-        const { data: existingOrder } = await supabase
-            .from('orders')
-            .select('order_no, actual_amount')
-            .eq('user_id', userId)
-            .eq('target_tier', tier)
-            .eq('duration_months', cleanDurationMonths)
-            .eq('status', 'pending')
-            .gt('expired_at', new Date().toISOString())
-            .maybeSingle();
-
-        if (existingOrder) {
-            console.log(`[payment/create] Reusing pending order ${existingOrder.order_no} for user ${userId}`);
-            // Generate real ZhifuFM payUrl via startOrder with existingOrder.order_no
-            const zfmRes = await requestZhifuFmUrl(existingOrder.order_no, existingOrder.actual_amount, payType);
-            if (!zfmRes.success) {
-                return res.status(400).json({ 
-                    success: false, 
-                    error: `Failed to retrieve payment url: ${zfmRes.msg || 'Unknown gateway error'}` 
-                });
-            }
-            return res.json({ 
-                success: true, 
-                order_no: existingOrder.order_no, 
-                payUrl: zfmRes.payUrl,
-                amount: existingOrder.actual_amount
-            });
-        }
-
-        // 2. Fetch Pricing Configs
+        // 1. Fetch Pricing Configs
         const { data: config, error: configErr } = await supabase
             .from('pricing_configs')
             .select('*')
@@ -98,11 +85,7 @@ router.post('/create', async (req, res) => {
 
         // 3. Determine actual amount (First month vs Renewal)
         // Explicit logic only — no silent fallback to discount_rate to avoid billing errors
-        const { data: profile } = await supabase
-            .from('profiles')
-            .select('tier')
-            .eq('id', userId)
-            .maybeSingle();
+        const profile = await getProfileWithSubscriptionSync(userId);
         
         const isRenewal = profile && 
                          profile.tier === tier && 
@@ -134,6 +117,36 @@ router.post('/create', async (req, res) => {
         actualAmount = Math.round(actualAmount); // Guard against any float sneak-in
         if (!Number.isInteger(actualAmount) || actualAmount <= 0 || actualAmount > 1000000) { // Max 10,000 RMB
             return res.status(400).json({ success: false, error: 'Calculated amount fails safety constraints (must be 1–1,000,000 cents)' });
+        }
+
+        // 3.5 Check for existing pending order (Deduplication)
+        // We only reuse if the amount MATCHES. If price changed (e.g. now a renewal), create a new one.
+        const { data: existingOrder } = await supabase
+            .from('orders')
+            .select('order_no, actual_amount')
+            .eq('user_id', userId)
+            .eq('target_tier', tier)
+            .eq('duration_months', cleanDurationMonths)
+            .eq('status', 'pending')
+            .eq('actual_amount', actualAmount) // Strict price match
+            .gt('expired_at', new Date().toISOString())
+            .maybeSingle();
+
+        if (existingOrder) {
+            console.log(`[payment/create] Reusing pending order ${existingOrder.order_no} for user ${userId}`);
+            const zfmRes = await requestZhifuFmUrl(existingOrder.order_no, existingOrder.actual_amount, payType);
+            if (!zfmRes.success) {
+                return res.status(400).json({ 
+                    success: false, 
+                    error: `Failed to retrieve payment url: ${zfmRes.msg || 'Unknown gateway error'}` 
+                });
+            }
+            return res.json({ 
+                success: true, 
+                order_no: existingOrder.order_no, 
+                payUrl: zfmRes.payUrl,
+                amount: existingOrder.actual_amount
+            });
         }
 
         // 4. Create Order
@@ -343,14 +356,27 @@ router.get('/query', async (req, res) => {
 
         const { data: order, error } = await supabase
             .from('orders')
-            .select('status')
+            .select('status, user_id') // Select user_id to fetch profile
             .eq('order_no', order_no)
             .maybeSingle();
 
         if (error || !order) return res.status(404).json({ success: false, error: 'Order not found' });
 
+        // Fetch profile with subscription sync
+        // Assuming getProfileWithSubscriptionSync is defined elsewhere and takes userId
+        // and that the order object contains user_id
+        const profile = await getProfileWithSubscriptionSync(order.user_id); 
+        if (!profile) {
+            // This case might indicate a data inconsistency or a deleted user,
+            // but the order itself might still be valid.
+            // For /query, we primarily care about order status.
+            // We can log this but still return the order status.
+            console.warn(`[payment/query] Profile not found for user_id: ${order.user_id} associated with order: ${order_no}`);
+        }
+
         return res.json({ success: true, status: order.status });
     } catch (err) {
+        console.error('[payment/query] Query failed:', err);
         return res.status(500).json({ success: false, error: 'Query failed' });
     }
 });

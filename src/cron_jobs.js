@@ -98,7 +98,7 @@ async function maintenanceSweeper() {
             // e.g., send slack/email hook
         }
 
-        // 3. Active ZFM Query (Fallback for dead webhooks)
+        // 4. Active ZFM Query (Fallback for dead webhooks)
         // (Omitted fully active implemention to save request quotas, but structure is here)
         
     } catch (err) {

@@ -9,7 +9,7 @@ const { r2Put, r2Get } = require('../utils/r2');
 const { kvGet, kvPut, kvDelete } = require('../utils/kv');
 const { injectData } = require('../utils/html');
 const { purgeCacheUrls } = require('../utils/cache');
-const { supabase } = require('../utils/supabase'); // Added Supabase Client
+const { supabase, getProfileWithSubscriptionSync } = require('../utils/supabase'); // Added Supabase Client
 
 const router = express.Router();
 
@@ -77,14 +77,11 @@ async function validateAndCheckQuota(userId, subdomain, template) {
         return { isValid: false, code: 4001, message: '请求必须包含 userId 以验证身份' };
     }
 
-    // 1. Fetch user tier & profile once
-    const { data: profile, error: profileErr } = await supabase
-        .from('profiles')
-        .select('tier, role, daily_edit_count, last_edit_date')
-        .eq('id', userId)
-        .maybeSingle();
+    // 1. Fetch user tier & profile once (with real-time subscription sync)
+    const profile = await getProfileWithSubscriptionSync(userId);
 
-    if (profileErr) throw new Error('Supabase Profile Error: ' + profileErr.message);
+    if (!profile) return { isValid: false, code: 4004, message: '用户资料不存在' };
+    if (profile.message) throw new Error('Supabase Profile Error: ' + profile.message); 
     const dbTier = (profile?.tier || '').toLowerCase();
     const tier = dbTier || (profile?.role === 'admin' ? 'admin' : 'free');
 
@@ -603,14 +600,11 @@ router.get('/status/:userId', async (req, res) => {
         res.setHeader('Pragma', 'no-cache');
         res.setHeader('Expires', '0');
 
-        // 1. Fetch user tier and edit stats
-        const { data: profile, error: profileErr } = await supabase
-            .from('profiles')
-            .select('tier, role, daily_edit_count, last_edit_date')
-            .eq('id', userId)
-            .maybeSingle();
+        // 1. Fetch user tier and edit stats (with real-time subscription sync)
+        const profile = await getProfileWithSubscriptionSync(userId);
         
-        if (profileErr) throw new Error('Supabase Profile Error: ' + profileErr.message);
+        if (!profile) return res.status(404).json({ success: false, error: 'User profile not found' });
+        if (profile.message) throw new Error('Supabase Profile Error: ' + profile.message);
         
         // Priority: tier field -> role field (as fallback) -> free
         const dbTier = (profile?.tier || '').toLowerCase();
