@@ -2,6 +2,9 @@ const express = require('express');
 const crypto = require('crypto');
 const { supabase } = require('../utils/supabase');
 
+// For node-fetch v3 (ESM) in CJS environment
+const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
+
 const router = express.Router();
 
 /**
@@ -10,7 +13,7 @@ const router = express.Router();
 function generateOrderNo(userId) {
     const timestamp = Date.now().toString();
     const randomHex = crypto.randomBytes(4).toString('hex');
-    const userHash = crypto.createHash('md5').update(userId).digest('hex').substring(0, 6);
+    const userHash = crypto.createHash('md5').update(String(userId)).digest('hex').substring(0, 6);
     return `ORDER_${timestamp}_${randomHex}_${userHash}`;
 }
 
@@ -43,7 +46,12 @@ router.post('/create', async (req, res) => {
         const { userId, tier, duration_months, payType } = req.body;
         
         if (!userId || !tier || !duration_months) {
-            return res.status(400).json({ success: false, error: "Missing required fields" });
+            return res.status(400).json({ success: false, error: "Missing required fields: userId, tier, duration_months" });
+        }
+
+        const cleanDurationMonths = parseInt(duration_months);
+        if (isNaN(cleanDurationMonths)) {
+            return res.status(400).json({ success: false, error: "duration_months must be a number" });
         }
 
         // 1. Check for existing pending order (Deduplication)
@@ -52,7 +60,7 @@ router.post('/create', async (req, res) => {
             .select('order_no, actual_amount')
             .eq('user_id', userId)
             .eq('target_tier', tier)
-            .eq('duration_months', duration_months)
+            .eq('duration_months', cleanDurationMonths)
             .eq('status', 'pending')
             .gt('expired_at', new Date().toISOString())
             .maybeSingle();
@@ -70,7 +78,7 @@ router.post('/create', async (req, res) => {
             .from('pricing_configs')
             .select('*')
             .eq('tier', tier)
-            .eq('duration_months', duration_months)
+            .eq('duration_months', cleanDurationMonths)
             .eq('is_active', true)
             .maybeSingle();
 
@@ -124,12 +132,12 @@ router.post('/create', async (req, res) => {
             .insert({
                 user_id: userId,
                 order_no: orderNo,
-                original_amount: config.base_price, // ← was `baseAmount` (undefined) — now correctly uses config.base_price
+                original_amount: config.base_price,
                 actual_amount: actualAmount,
-                pay_type: payType || 'alipay',
+                pay_type: payType || 'wechat', // Default to wechat to match Upgrade.jsx
                 target_tier: tier,
-                duration_months: duration_months,
-                pricing_snapshot: config, // L6.5 JSONB pricing snapshot lock
+                duration_months: cleanDurationMonths,
+                pricing_snapshot: JSON.parse(JSON.stringify(config)), // Ensure clean JSON
                 expired_at: expiredAt.toISOString()
             });
 
@@ -155,7 +163,10 @@ router.post('/create', async (req, res) => {
 
     } catch (err) {
         console.error('[payment/create] Fatal:', err);
-        return res.status(500).json({ success: false, error: 'Internal server error during order creation' });
+        return res.status(500).json({ 
+            success: false, 
+            error: `Internal server error during order creation: ${err.message || 'Unknown error'}` 
+        });
     }
 });
 
