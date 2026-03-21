@@ -135,7 +135,20 @@ async function validateAndCheckQuota(userId, subdomain, template) {
         return { isValid: false, code: 4003, message: '该域名为系统保留字或已禁用，请更换试试哦' };
     }
 
-    // 2. Fetch all user projects to check quota and identify the latest one
+    // 3. Global Domain Uniqueness Check (CRITICAL: Prevent cross-user overrides)
+    const { data: existingSameDomain, error: existErr } = await supabase
+        .from('projects')
+        .select('user_id')
+        .eq('subdomain', subLow)
+        .maybeSingle();
+
+    if (existErr) throw new Error('Supabase Existing Check Error: ' + existErr.message);
+
+    if (existingSameDomain && existingSameDomain.user_id !== userId) {
+        return { isValid: false, code: 4005, message: '该域名已被其他用户抢注啦，换一个更特别的吧~' };
+    }
+
+    // 4. Fetch all user projects to check quota and identify the latest one
     // Include 'template' to check for grandfathered-in access
     const { data: userProjects, error: fetchArrErr } = await supabase
         .from('projects')
