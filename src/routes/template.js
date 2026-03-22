@@ -494,7 +494,7 @@ router.post('/sync-local', requireAdmin, async (req, res) => {
 });
 
 // ── GET /api/template/list ────────────────────────────────────────────────────
-router.get('/list', async (_req, res) => {
+router.get('/list', async (req, res) => {
     try {
         const now = Date.now();
         const cacheExpired = !cachedTemplates || (now - cachedTemplatesAt > TEMPLATE_CACHE_TTL_MS);
