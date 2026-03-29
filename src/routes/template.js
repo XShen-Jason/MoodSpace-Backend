@@ -146,15 +146,14 @@ router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
             return res.status(400).json({ error: 'index.html is required' });
         }
 
-        const version = makeVersion();
-        const uploadedFiles = [];
-
-        // Write every uploaded file to R2 under versioned path
-        for (const file of files) {
-            const r2Key = `templates/${templateName}/${version}/${file.fieldname}`;
-            await r2Put(r2Key, file.buffer, file.mimetype);
-            uploadedFiles.push(file.fieldname);
+        const crypto = require('crypto');
+        const assetFiles = files.filter(f => f.fieldname !== 'config.json' && f.fieldname !== 'schema.json').sort((a,b) => a.fieldname.localeCompare(b.fieldname));
+        const hash = crypto.createHash('md5');
+        for (const f of assetFiles) {
+            hash.update(f.fieldname);
+            hash.update(f.buffer);
         }
+        const newAssetsHash = hash.digest('hex');
 
         // Parse metadata (config.json or schema.json)
         let fields = [];
@@ -162,7 +161,6 @@ router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
         let title = templateName; // Fallback to slug
         let tier = 'free'; // Default to Free
         let price = 0;
-        
         let status = 'active';
 
         const metaFile = files.find((f) => f.fieldname === 'config.json' || f.fieldname === 'schema.json');
@@ -181,6 +179,62 @@ router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
         }
 
         const existingMeta = await kvGet(`__tmpl__${templateName}`);
+
+        // OPTIMIZATION: Decoupled Sync
+        // If the hash of all assets exactly matches what we previously uploaded,
+        // we ONLY overwrite the JSON file (no version bump, no garbage collection).
+        if (existingMeta && existingMeta.version && existingMeta.assetsHash === newAssetsHash && metaFile) {
+            console.log(`[upload] Template '${templateName}' assets unchanged. Decoupled Syncing config only...`);
+            
+            await r2Put(`templates/${templateName}/${existingMeta.version}/${metaFile.fieldname}`, metaFile.buffer, metaFile.mimetype);
+
+            // Keep existing status if it was changed logically, unless config explicitly specifies a non-active status
+            const finalStatus = status !== 'active' ? status : (existingMeta.status || 'active');
+
+            await kvPut(`__tmpl__${templateName}`, {
+                ...existingMeta,
+                title, tier, price, fields, static: isStatic,
+                status: finalStatus,
+                updatedAt: new Date().toISOString()
+            });
+
+            // Rebuild static list
+            cachedTemplates = null;
+            rebuildStaticTemplateList().catch(err => {
+                console.error('[template/upload] Failed to rebuild static list:', err);
+            });
+
+            // Sync to Github
+            const syncToGithub = req.body.syncToGithub === 'true';
+            if (syncToGithub) {
+                commitToGitHub(templateName, files).catch(err => {
+                    console.error('[template/upload] GitHub sync failed:', err);
+                });
+            }
+
+            return res.json({
+                success: true,
+                templateName,
+                version: existingMeta.version,
+                fields,
+                static: isStatic,
+                filesUploaded: [metaFile.fieldname],
+                previewUrl: `${process.env.FRONTEND_URL || 'https://www.moodspace.xyz'}/preview/${templateName}`,
+                githubSynced: syncToGithub,
+                method: 'decoupled'
+            });
+        }
+
+        const version = makeVersion();
+        const uploadedFiles = [];
+
+        // Write every uploaded file to R2 under versioned path
+        for (const file of files) {
+            const r2Key = `templates/${templateName}/${version}/${file.fieldname}`;
+            await r2Put(r2Key, file.buffer, file.mimetype);
+            uploadedFiles.push(file.fieldname);
+        }
+
         if (existingMeta && existingMeta.version) {
             await enqueueGarbageCollection(templateName, existingMeta.version);
         }
@@ -194,8 +248,9 @@ router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
             version,
             fields,
             static: isStatic,
-            status,
+            status: status !== 'active' ? status : (existingMeta?.status || 'active'),
             updatedAt: new Date().toISOString(),
+            assetsHash: newAssetsHash
         });
 
         // Invalidate the in-memory cache and rebuild the static templates.json file on disk
