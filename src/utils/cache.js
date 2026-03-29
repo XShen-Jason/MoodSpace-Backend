@@ -36,4 +36,31 @@ async function purgeCacheUrls(urls) {
     }
 }
 
-module.exports = { purgeCacheUrls };
+/**
+ * Purge EVERYTHING from Cloudflare's CDN cache for this zone.
+ */
+async function purgeEverything() {
+    if (!process.env.CF_ZONE_ID || !process.env.CF_API_TOKEN) {
+        throw new Error('CF_ZONE_ID or CF_API_TOKEN not set');
+    }
+
+    const res = await fetch(
+        `https://api.cloudflare.com/client/v4/zones/${process.env.CF_ZONE_ID}/purge_cache`,
+        {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${process.env.CF_API_TOKEN}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ purge_everything: true }),
+        }
+    );
+
+    const json = await res.json();
+    if (!res.ok || !json.success) {
+        throw new Error('Purge failed: ' + JSON.stringify(json.errors));
+    }
+    console.log(`[cache] Purged EVERYTHING`);
+}
+
+module.exports = { purgeCacheUrls, purgeEverything };

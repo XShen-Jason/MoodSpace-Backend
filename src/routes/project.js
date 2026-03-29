@@ -819,4 +819,71 @@ router.get('/config-by-subdomain/:subdomain', async (req, res) => {
     }
 });
 
+// ── NEW: POST /api/project/mass-render ─────────────────────────────────────
+router.post('/mass-render', requireAdmin, async (req, res) => {
+    try {
+        const { templateName } = req.body;
+        if (!templateName) return res.status(400).json({ error: 'Missing templateName' });
+
+        // 1. Find all projects using this template
+        // We need userId, subdomain, data, show_viral_footer, and the user's tier
+        const { data: projects, error } = await supabase
+            .from('projects')
+            .select('subdomain, user_id, data, show_viral_footer, profiles(tier, role)')
+            .eq('template_type', templateName);
+
+        if (error) throw error;
+        if (!projects || projects.length === 0) {
+            return res.json({ success: true, count: 0, message: '没有找到使用该模板的用户页面' });
+        }
+
+        // 2. Start background rendering task
+        // We do this asynchronously so the admin API call returns quickly
+        setImmediate(async () => {
+            console.log(`[mass-render] Starting background render for ${projects.length} projects using ${templateName}...`);
+            await ensureQuotas();
+
+            let successCount = 0;
+            let failCount = 0;
+
+            for (let i = 0; i < projects.length; i++) {
+                const project = projects[i];
+                try {
+                    const userTier = (project.profiles?.tier || project.profiles?.role || 'free').toLowerCase();
+                    const tierConfig = memoryQuotas[userTier] || memoryQuotas['free'];
+
+                    await renderProjectInternal({
+                        subdomain: project.subdomain,
+                        userId: project.user_id,
+                        type: templateName,
+                        data: project.data,
+                        showViralFooter: project.show_viral_footer,
+                        isUpdate: true,
+                        tierConfig,
+                    });
+                    successCount++;
+                } catch (e) {
+                    console.error(`[mass-render] Failed for ${project.subdomain}:`, e.message);
+                    failCount++;
+                }
+                
+                // Sleep 100ms between renders to avoid overwhelming R2 put limits
+                await new Promise(r => setTimeout(r, 100));
+            }
+
+            console.log(`[mass-render] Finished for ${templateName}: ${successCount} success, ${failCount} failed.`);
+        });
+
+        return res.json({ 
+            success: true, 
+            count: projects.length, 
+            message: `已在后台触发 ${projects.length} 个页面的预渲染任务，请稍看大盘日志` 
+        });
+
+    } catch (err) {
+        console.error('[project/mass-render]', err);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = { router, renderProjectInternal, memoryQuotas, ensureQuotas };

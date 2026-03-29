@@ -16,7 +16,7 @@ const { makeVersion } = require('../utils/mime');
 const { injectData } = require('../utils/html');
 const { supabase } = require('../utils/supabase');
 const { renderProjectInternal, memoryQuotas } = require('./project');
-const { purgeCacheUrls } = require('../utils/cache');
+const { purgeCacheUrls, purgeEverything } = require('../utils/cache');
 
 // ── Local GC Queue (VPS file-system, zero KV cost) ──────────────────────────
 // Stores pending R2 deletions in a local JSON file instead of Cloudflare KV.
@@ -1010,6 +1010,118 @@ router.get('/:type/*', async (req, res) => {
     } catch (err) {
         console.error('[template/assets]', err);
         return res.status(500).send('Internal Server Error');
+    }
+});
+
+// ── NEW: POST /api/template/purge-all ──────────────────────────────────────
+router.post('/purge-all', requireAdmin, async (req, res) => {
+    try {
+        await purgeEverything();
+        return res.json({ success: true, message: '成功强刷全站边缘缓存' });
+    } catch (err) {
+        console.error('[template/purge-all]', err);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+// ── NEW: GET /api/template/health ──────────────────────────────────────────
+router.get('/health', requireAdmin, async (req, res) => {
+    try {
+        const stats = {
+            github: { status: 'pending', ms: 0 },
+            kv: { status: 'pending', ms: 0 },
+            r2: { status: 'pending', ms: 0 }
+        };
+
+        // 1. Test GitHub
+        const ghStart = Date.now();
+        try {
+            const fetchOptions = { headers: {} };
+            if (process.env.GHTOKEN) fetchOptions.headers['Authorization'] = `token ${process.env.GHTOKEN}`;
+            const ghRes = await fetch('https://api.github.com/zen', { ...fetchOptions, timeout: 5000 });
+            stats.github.status = ghRes.ok ? 'up' : 'down';
+            stats.github.ms = Date.now() - ghStart;
+        } catch {
+            stats.github.status = 'down';
+            stats.github.ms = Date.now() - ghStart;
+        }
+
+        // 2. Test KV
+        const kvStart = Date.now();
+        try {
+            await kvPut('__health_ping__', 'pong', 60);
+            await kvGet('__health_ping__');
+            stats.kv.status = 'up';
+            stats.kv.ms = Date.now() - kvStart;
+        } catch {
+            stats.kv.status = 'down';
+            stats.kv.ms = Date.now() - kvStart;
+        }
+
+        // 3. Test R2
+        const r2Start = Date.now();
+        try {
+            await r2List('templates/'); // just fetching one page to test connection
+            stats.r2.status = 'up';
+            stats.r2.ms = Date.now() - r2Start;
+        } catch {
+            stats.r2.status = 'down';
+            stats.r2.ms = Date.now() - r2Start;
+        }
+
+        return res.json({ success: true, stats });
+    } catch (err) {
+        console.error('[template/health]', err);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+// ── NEW: POST /api/template/deep-sweep ─────────────────────────────────────
+router.post('/deep-sweep', requireAdmin, async (req, res) => {
+    try {
+        // 1. Fetch current active versions from KV
+        const activeKeys = await kvList('__tmpl__');
+        const activeVersions = [];
+        for (const k of activeKeys) {
+            const meta = await kvGet(k);
+            if (meta && meta.name && meta.version) {
+                activeVersions.push(`templates/${meta.name}/${meta.version}/`);
+            }
+        }
+
+        // 2. Fetch locally buffered GC items (don't sweep them if they are in 24h grace)
+        const guardedPaths = readGcQueue().map(q => q.prefix);
+
+        // 3. List all files under templates/ in R2
+        const allR2Keys = await r2List('templates/');
+
+        // 4. Identify orphaned objects
+        const toDelete = [];
+        for (const objKey of allR2Keys) {
+            // objKey is like "templates/demo/v1234/index.html"
+            const parts = objKey.split('/');
+            if (parts.length >= 3) {
+                const prefix = `templates/${parts[1]}/${parts[2]}/`; // e.g. "templates/demo/v1234/"
+                
+                const isActive = activeVersions.includes(prefix);
+                const isGuarded = guardedPaths.includes(prefix);
+                
+                if (!isActive && !isGuarded) {
+                    toDelete.push(objKey);
+                }
+            }
+        }
+
+        // 5. Delete in chunks
+        if (toDelete.length > 0) {
+            await r2DeleteObjects(toDelete);
+            console.log(`[template/deep-sweep] Cleaned ${toDelete.length} orphaned objects`);
+        }
+
+        return res.json({ success: true, count: toDelete.length, message: `成功清理 ${toDelete.length} 个幽灵碎裂文件` });
+    } catch (err) {
+        console.error('[template/deep-sweep]', err);
+        return res.status(500).json({ error: err.message });
     }
 });
 
