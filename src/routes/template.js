@@ -1,7 +1,8 @@
 /**
  * Template routes
- * POST /api/template/upload  — Upload a new template (multipart/form-data)
- * GET  /api/template/list    — List all registered templates
+ * POST /api/template/upload    — Upload a new template (multipart/form-data)
+ * POST /api/template/sync-meta — Sync only config.json metadata from GitHub to KV (no R2 asset changes)
+ * GET  /api/template/list      — List all registered templates
  * GET  /api/template/preview/:name — Preview a template with default data
  */
 const express = require('express');
@@ -17,16 +18,47 @@ const { supabase } = require('../utils/supabase');
 const { renderProjectInternal, memoryQuotas } = require('./project');
 const { purgeCacheUrls } = require('../utils/cache');
 
-// Enqueue old template versions for Garbage Collection (24h delay to prevent 404s on cached edges)
-async function enqueueGarbageCollection(name, oldVersion) {
+// ── Local GC Queue (VPS file-system, zero KV cost) ──────────────────────────
+// Stores pending R2 deletions in a local JSON file instead of Cloudflare KV.
+// Trade-off: If the VPS disk is wiped, orphaned R2 files lose their index.
+// Acceptable: old R2 files are tiny and storage is cheap vs KV write quota.
+const GC_QUEUE_FILE = process.env.GC_QUEUE_PATH ?? '/opt/cache/gc_queue.json';
+
+/** Read the current GC queue from disk. Returns [] on miss/corrupt. */
+function readGcQueue() {
+    try {
+        if (!fs.existsSync(GC_QUEUE_FILE)) return [];
+        return JSON.parse(fs.readFileSync(GC_QUEUE_FILE, 'utf-8'));
+    } catch (e) {
+        console.warn('[gc] gc_queue.json unreadable, treating as empty:', e.message);
+        return [];
+    }
+}
+
+/** Persist the GC queue to disk (ensures parent dir exists). */
+function writeGcQueue(queue) {
+    const dir = path.dirname(GC_QUEUE_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(GC_QUEUE_FILE, JSON.stringify(queue, null, 2), 'utf-8');
+}
+
+/**
+ * Enqueue old template version for deferred R2 deletion.
+ * Written to local disk — ZERO KV usage.
+ * The 24h delay prevents 404s on CDN-edge cached pages that still reference the old version.
+ */
+function enqueueGarbageCollection(name, oldVersion) {
     if (!oldVersion) return;
-    const gcKey = `__sys_gc_${name}_${oldVersion}`;
-    const gcData = {
-        prefix: `templates/${name}/${oldVersion}/`,
+    const queue = readGcQueue();
+    const prefix = `templates/${name}/${oldVersion}/`;
+    // Avoid duplicate entries
+    if (queue.some(e => e.prefix === prefix)) return;
+    queue.push({
+        prefix,
         expireAt: Date.now() + 24 * 60 * 60 * 1000 // 24 hours
-    };
-    await kvPut(gcKey, gcData);
-    console.log(`[gc] Enqueued old version for deletion: ${gcData.prefix}`);
+    });
+    writeGcQueue(queue);
+    console.log(`[gc] Enqueued old version for deletion (local): ${prefix}`);
 }
 
 const router = express.Router();
@@ -746,40 +778,154 @@ router.delete('/:name', requireAdmin, async (req, res) => {
     }
 });
 
+// ── POST /api/template/sync-meta ─────────────────────────────────────────────
+// Admin only: Pull config.json for every template from GitHub and patch KV + R2.
+// Does NOT bump versions, does NOT touch HTML assets — pure metadata refresh.
+// Cost: 1 GitHub API call per template + 1 KV Write + 1 R2 Put per changed template.
+router.post('/sync-meta', requireAdmin, async (req, res) => {
+    try {
+        const repoOwner = process.env.TEMPLATES_REPO_OWNER;
+        const repoName  = process.env.TEMPLATES_REPO_NAME;
+
+        if (!repoOwner || !repoName) {
+            return res.status(400).json({
+                error: '未配置 GitHub 仓库。请在 .env 中设置 TEMPLATES_REPO_OWNER 和 TEMPLATES_REPO_NAME。'
+            });
+        }
+
+        const ghHeaders = { 'User-Agent': 'Template-Sync-Client' };
+        if (process.env.GITHUB_TOKEN) ghHeaders['Authorization'] = `token ${process.env.GITHUB_TOKEN}`;
+
+        const baseUrl  = `https://api.github.com/repos/${repoOwner}/${repoName}/contents/src`;
+        const dirRes   = await fetch(baseUrl, { headers: ghHeaders });
+        if (!dirRes.ok) throw new Error(`GitHub API error: ${dirRes.statusText}`);
+
+        const dirs     = (await dirRes.json()).filter(c => c.type === 'dir').map(c => c.name);
+        const results  = [];
+        const now      = new Date().toISOString();
+
+        for (const name of dirs) {
+            if (!NAME_REGEX.test(name)) continue;
+
+            // Fetch the file listing for this template folder
+            const folderRes = await fetch(`${baseUrl}/${name}`, { headers: ghHeaders });
+            if (!folderRes.ok) { results.push({ name, skipped: true, reason: 'folder fetch failed' }); continue; }
+            const folderFiles = await folderRes.json();
+
+            const configEntry = Array.isArray(folderFiles)
+                ? folderFiles.find(f => f.name === 'config.json' || f.name === 'schema.json')
+                : null;
+            if (!configEntry) { results.push({ name, skipped: true, reason: 'no config.json' }); continue; }
+
+            // Fetch raw config content
+            const cfgRes = await fetch(configEntry.download_url);
+            if (!cfgRes.ok) { results.push({ name, skipped: true, reason: 'download failed' }); continue; }
+            const cfgBuf  = Buffer.from(await cfgRes.arrayBuffer());
+            let   cfgJson;
+            try { cfgJson = JSON.parse(cfgBuf.toString('utf-8')); }
+            catch (e) { results.push({ name, skipped: true, reason: 'JSON parse error' }); continue; }
+
+            // Compare with current KV state
+            const existingMeta = await kvGet(`__tmpl__${name}`);
+            if (!existingMeta || !existingMeta.version) {
+                results.push({ name, skipped: true, reason: 'not in KV (upload first)' }); continue;
+            }
+
+            const newSha   = configEntry.sha;
+            const prevSha  = existingMeta.configSha || '';
+            if (prevSha === newSha) {
+                results.push({ name, changed: false, sha: newSha });
+                continue;
+            }
+
+            // Config changed — patch R2 config file and KV metadata
+            await r2Put(
+                `templates/${name}/${existingMeta.version}/${configEntry.name}`,
+                cfgBuf,
+                'application/json'
+            );
+
+            const fields     = cfgJson.fields ?? [];
+            const isStatic   = cfgJson.static === true || fields.length === 0;
+            const finalStatus = (cfgJson.status && cfgJson.status !== 'active')
+                ? cfgJson.status
+                : (existingMeta.status || 'active');
+
+            await kvPut(`__tmpl__${name}`, {
+                ...existingMeta,
+                title:      cfgJson.title      || existingMeta.title,
+                tier:       cfgJson.tier === 'pro' ? 'pro' : 'free',
+                price:      cfgJson.price      ?? existingMeta.price ?? 0,
+                fields,
+                static:     isStatic,
+                scene:      cfgJson.scene      ?? existingMeta.scene ?? '',
+                categories: cfgJson.categories ?? existingMeta.categories ?? [],
+                status:     finalStatus,
+                configSha:  newSha,
+                updatedAt:  now
+            });
+
+            results.push({ name, changed: true, sha: newSha });
+        }
+
+        const changedCount = results.filter(r => r.changed).length;
+        if (changedCount > 0) {
+            cachedTemplates = null;
+            await rebuildStaticTemplateList();
+        }
+
+        return res.json({
+            success: true,
+            message: `元数据同步完成。共更新 ${changedCount} 个模板配置。`,
+            changedCount,
+            details: results
+        });
+    } catch (err) {
+        console.error('[template/sync-meta]', err);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
 // ── POST /api/template/prune ─────────────────────────────────────────────
-// Admin only: Removes old versions of templates by reading the O(1) GC Queue.
+// Admin only: Removes old R2 versions by reading the local GC Queue file.
+// Zero KV usage — all state lives in /opt/cache/gc_queue.json on the VPS.
 router.post('/prune', requireAdmin, async (req, res) => {
     try {
-        console.log('[prune] Starting GC Queue processing...');
-        
-        const gcKeys = await kvList('__sys_gc_');
+        console.log('[prune] Starting GC Queue processing (local file)...');
+
+        const queue  = readGcQueue();
+        const now    = Date.now();
         let objectsDeleted = 0;
-        let prunedDirs = [];
-        const now = Date.now();
+        const prunedDirs   = [];
+        const remaining    = []; // entries not yet eligible for deletion
 
-        for (const key of gcKeys) {
-            const gcData = await kvGet(key);
-            // Must have data and be expired (24h has passed)
-            if (!gcData || now < gcData.expireAt) continue;
+        for (const entry of queue) {
+            if (!entry.prefix || !entry.expireAt) continue;
 
-            console.log(`[prune] Sweeping old directory: ${gcData.prefix}`);
-            
-            // Delete files in exact specific old directory
-            const objects = await r2List(gcData.prefix);
+            if (now < entry.expireAt) {
+                // Still within the 24h CDN-edge protection window
+                remaining.push(entry);
+                continue;
+            }
+
+            console.log(`[prune] Sweeping old directory: ${entry.prefix}`);
+            const objects = await r2List(entry.prefix);
             if (objects.length > 0) {
                 await r2DeleteObjects(objects);
                 objectsDeleted += objects.length;
             }
-            
-            await kvDelete(key);
-            prunedDirs.push(gcData.prefix);
+            prunedDirs.push(entry.prefix);
         }
+
+        // Persist only the entries that are still within their protection window
+        writeGcQueue(remaining);
 
         return res.json({
             success: true,
             message: `Storage optimization complete.`,
             objectsDeleted,
-            prunedDirs
+            prunedDirs,
+            pendingCount: remaining.length
         });
     } catch (err) {
         console.error('[template/prune]', err);
