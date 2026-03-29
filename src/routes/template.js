@@ -162,6 +162,8 @@ router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
         let tier = 'free'; // Default to Free
         let price = 0;
         let status = 'active';
+        let scene = '';
+        let categories = [];
 
         const metaFile = files.find((f) => f.fieldname === 'config.json' || f.fieldname === 'schema.json');
         if (metaFile) {
@@ -173,6 +175,8 @@ router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
                 if (schema.tier === 'pro') tier = 'pro'; // Explicitly Pro
                 if (schema.price) price = schema.price;
                 if (schema.status) status = schema.status;
+                if (schema.scene) scene = schema.scene;
+                if (schema.categories) categories = schema.categories;
             } catch (e) {
                 console.warn(`[template/upload] Failed to parse config.json for ${templateName}`);
             }
@@ -195,6 +199,7 @@ router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
                 ...existingMeta,
                 title, tier, price, fields, static: isStatic,
                 status: finalStatus,
+                scene, categories,
                 updatedAt: new Date().toISOString()
             });
 
@@ -248,6 +253,8 @@ router.post('/upload', requireAdmin, upload.any(), async (req, res) => {
             version,
             fields,
             static: isStatic,
+            scene,
+            categories,
             status: status !== 'active' ? status : (existingMeta?.status || 'active'),
             updatedAt: new Date().toISOString(),
             assetsHash: newAssetsHash
@@ -350,13 +357,15 @@ router.post('/sync-local', requireAdmin, async (req, res) => {
                     const isStatic = configJson?.static === true || fields.length === 0;
                     // Keep existing status if present (e.g. if user set it to 'offline' in UI)
                     const status = existingMeta?.status || configJson?.status || 'active';
+                    const scene = configJson?.scene || existingMeta?.scene || '';
+                    const categories = configJson?.categories || existingMeta?.categories || [];
 
                     await kvPut(`__tmpl__${name}`, {
                         ...existingMeta,
                         title: configJson?.title || name,
                         tier: configJson?.tier === 'pro' ? 'pro' : 'free',
                         price: configJson?.price || 0,
-                        fields, static: isStatic, status,
+                        fields, static: isStatic, status, scene, categories,
                         updatedAt: new Date().toISOString(),
                         gitSha: newGitSha
                     });
@@ -395,13 +404,15 @@ router.post('/sync-local', requireAdmin, async (req, res) => {
                 const price = configJson?.price || 0;
                 // Keep existing status if present
                 const status = existingMeta?.status || configJson?.status || 'active';
+                const scene = configJson?.scene || '';
+                const categories = configJson?.categories || [];
 
                 if (existingMeta && existingMeta.version) {
                     await enqueueGarbageCollection(name, existingMeta.version);
                 }
 
                 await kvPut(`__tmpl__${name}`, {
-                    name, title, tier, price, version, fields, static: isStatic, status, 
+                    name, title, tier, price, version, fields, static: isStatic, status, scene, categories,
                     updatedAt: new Date().toISOString(),
                     gitSha: newGitSha // Store SHA for next sync detection
                 });
@@ -449,13 +460,15 @@ router.post('/sync-local', requireAdmin, async (req, res) => {
                     const isStatic = configJson?.static === true || fields.length === 0;
                     // Keep existing status if present
                     const status = existingMeta?.status || configJson?.status || 'active';
+                    const scene = configJson?.scene || existingMeta?.scene || '';
+                    const categories = configJson?.categories || existingMeta?.categories || [];
 
                     await kvPut(`__tmpl__${name}`, {
                         ...existingMeta,
                         title: configJson?.title || name,
                         tier: configJson?.tier === 'pro' ? 'pro' : 'free',
                         price: configJson?.price || 0,
-                        fields, static: isStatic, status,
+                        fields, static: isStatic, status, scene, categories,
                         updatedAt: new Date().toISOString(),
                         localMtimeConfig: mtimeConfig
                     });
@@ -494,13 +507,15 @@ router.post('/sync-local', requireAdmin, async (req, res) => {
                 const price = configJson?.price || 0;
                 // Keep existing status if present
                 const status = existingMeta?.status || configJson?.status || 'active';
+                const scene = configJson?.scene || '';
+                const categories = configJson?.categories || [];
 
                 if (existingMeta && existingMeta.version) {
                     await enqueueGarbageCollection(name, existingMeta.version);
                 }
 
                 await kvPut(`__tmpl__${name}`, {
-                    name, title, tier, price, version, fields, static: isStatic, status, 
+                    name, title, tier, price, version, fields, static: isStatic, status, scene, categories,
                     updatedAt: new Date().toISOString(),
                     localMtime: mtime,
                     localMtimeConfig: mtimeConfig
