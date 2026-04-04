@@ -813,6 +813,9 @@ router.get('/status/:userId', async (req, res) => {
         if (!profile) return res.status(404).json({ success: false, error: 'User profile not found' });
         if (profile.message) throw new Error('Supabase Profile Error: ' + profile.message);
         
+        // Ensure all quotas are loaded into memory BEFORE validating the tier 
+        await ensureQuotas();
+
         // Priority: tier field -> role field (as fallback) -> free
         const dbTier = (profile?.tier || '').toLowerCase();
         let tier = dbTier || (profile?.role === 'admin' ? 'admin' : 'free');
@@ -837,7 +840,6 @@ router.get('/status/:userId', async (req, res) => {
             .eq('invited_by', userId)
             .eq('invite_reward_claimed', true);
 
-        await ensureQuotas();
         const tierConfig = memoryQuotas[tier] || memoryQuotas['free'];
         
         // 5人送1额度，10人送1额度，最多送2个额度
