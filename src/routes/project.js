@@ -249,13 +249,13 @@ async function validateAndCheckQuota(userId, subdomain, template) {
             };
         }
 
-        // Ownership verified (existingProject belongs to user). Check if it's the "Active/Latest" one.
-        const activeProjectSubdomain = userProjects[0]?.subdomain;
-        if (existingProject.subdomain !== activeProjectSubdomain) {
+        // Ownership verified (existingProject belongs to user). Check if it's within the allowed active slots.
+        const allowedProjects = userProjects.slice(0, maxDomains).map(p => p.subdomain);
+        if (!allowedProjects.includes(existingProject.subdomain)) {
             return {
                 isValid: false,
                 code: 4021,
-                message: '由于等级到期，该项目已被锁定访问。仅最近编辑的一个项目可继续维护。'
+                message: `由于等级到期或配额超限，该项目已被锁定。当前您的额度为 ${maxDomains} 个，仅最近编辑的 ${maxDomains} 个项目可继续维护。`
             };
         }
 
